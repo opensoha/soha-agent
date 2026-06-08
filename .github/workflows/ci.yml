@@ -19,6 +19,7 @@ jobs:
         with:
           repository: opensoha/soha-contracts
           path: soha-contracts
+          token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
