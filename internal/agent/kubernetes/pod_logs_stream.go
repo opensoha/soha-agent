@@ -1,0 +1,28 @@
+package kubernetes
+
+import (
+	"context"
+	"io"
+
+	corev1 "k8s.io/api/core/v1"
+)
+
+func (c *Client) StreamPodLogs(ctx context.Context, namespace, name, container string, tailLines, sinceSeconds int64, stdout io.Writer) error {
+	options := &corev1.PodLogOptions{
+		Container: container,
+		Follow:    true,
+	}
+	if tailLines > 0 {
+		options.TailLines = &tailLines
+	}
+	if sinceSeconds > 0 {
+		options.SinceSeconds = &sinceSeconds
+	}
+	stream, err := c.typed.CoreV1().Pods(namespace).GetLogs(name, options).Stream(ctx)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+	_, err = io.Copy(stdout, stream)
+	return err
+}

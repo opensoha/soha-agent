@@ -42,3 +42,25 @@ func TestPrepareComposeWorkspaceRemovesStaleEnvFileWhenEnvContentIsCleared(t *te
 		t.Fatalf(".env stat err = %v, want not exist", err)
 	}
 }
+
+func TestDockerOperationKindAllowedRequiresExplicitAllowlist(t *testing.T) {
+	cases := []struct {
+		name      string
+		allowed   []string
+		kind      string
+		wantAllow bool
+	}{
+		{name: "empty list denies", kind: "project_deploy", wantAllow: false},
+		{name: "exact match allows", allowed: []string{"project_deploy"}, kind: "project_deploy", wantAllow: true},
+		{name: "different kind denies", allowed: []string{"host_sync"}, kind: "project_deploy", wantAllow: false},
+		{name: "wildcard allows", allowed: []string{"*"}, kind: "service_action", wantAllow: true},
+		{name: "empty kind denies", allowed: []string{"*"}, kind: "", wantAllow: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dockerOperationKindAllowed(tc.allowed, tc.kind); got != tc.wantAllow {
+				t.Fatalf("dockerOperationKindAllowed(%v, %q) = %t, want %t", tc.allowed, tc.kind, got, tc.wantAllow)
+			}
+		})
+	}
+}

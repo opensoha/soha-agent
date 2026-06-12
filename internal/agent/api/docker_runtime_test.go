@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
+	"go.uber.org/zap"
 )
 
 func TestDockerRuntimeRoutesRequireConfiguredToken(t *testing.T) {
@@ -58,9 +61,65 @@ func TestDockerRuntimeRoutesAcceptAgentOrControlPlaneToken(t *testing.T) {
 	}
 }
 
+func TestDockerRuntimeTerminalRejectsUntrustedOrigin(t *testing.T) {
+	router := dockerRuntimeTestRouter(cfgpkg.Config{
+		HTTP:     cfgpkg.HTTPConfig{BasePath: "/api/v1"},
+		Auth:     cfgpkg.AuthConfig{BearerToken: "agent-token"},
+		Security: cfgpkg.SecurityConfig{AllowedActions: []string{actionDockerRuntimeTerminal}},
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer agent-token")
+	headers.Set("Origin", "https://evil.example")
+	conn, resp, err := websocket.DefaultDialer.Dial(strings.Replace(server.URL, "http://", "ws://", 1)+"/api/v1/docker/runtime/terminal", headers)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil {
+		t.Fatal("Dial() succeeded, want origin rejection")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %v, want %d", responseStatus(resp), http.StatusForbidden)
+	}
+}
+
+func TestDockerRuntimeTerminalAcceptsConfiguredOrigin(t *testing.T) {
+	router := dockerRuntimeTestRouter(cfgpkg.Config{
+		HTTP: cfgpkg.HTTPConfig{
+			BasePath:       "/api/v1",
+			AllowedOrigins: []string{"https://console.example"},
+		},
+		Auth:     cfgpkg.AuthConfig{BearerToken: "agent-token"},
+		Security: cfgpkg.SecurityConfig{AllowedActions: []string{actionDockerRuntimeTerminal}},
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer agent-token")
+	headers.Set("Origin", "https://console.example")
+	conn, resp, err := websocket.DefaultDialer.Dial(strings.Replace(server.URL, "http://", "ws://", 1)+"/api/v1/docker/runtime/terminal", headers)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("Dial() error = %v status=%v", err, responseStatus(resp))
+	}
+	conn.Close()
+}
+
 func dockerRuntimeTestRouter(cfg cfgpkg.Config) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	registerDockerRuntimeRoutes(router, cfg)
+	registerDockerRuntimeRoutes(router, cfg, zap.NewNop(), newActionPolicy(cfg.Security, zap.NewNop(), nil))
 	return router
+}
+
+func responseStatus(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
 }

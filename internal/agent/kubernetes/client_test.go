@@ -1,8 +1,10 @@
 package kubernetes
 
 import (
+	"strings"
 	"testing"
 
+	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
 	corev1 "k8s.io/api/core/v1"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
 )
@@ -34,5 +36,18 @@ func TestMapPodIncludesRequestsAndLimits(t *testing.T) {
 	}
 	if view.Limits.CPU != "500m" || view.Limits.Memory != "256Mi" {
 		t.Fatalf("Limits = %+v, want cpu=500m memory=256Mi", view.Limits)
+	}
+}
+
+func TestBuildRESTConfigUsesInClusterWhenKubeconfigEmpty(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+
+	_, err := buildRESTConfig(cfgpkg.KubernetesConfig{})
+	if err == nil {
+		t.Fatal("buildRESTConfig() succeeded, want in-cluster config error outside Kubernetes")
+	}
+	if !strings.Contains(err.Error(), "KUBERNETES_SERVICE_HOST") {
+		t.Fatalf("buildRESTConfig() error = %v, want in-cluster config error", err)
 	}
 }

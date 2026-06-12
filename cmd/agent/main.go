@@ -9,10 +9,16 @@ import (
 	"time"
 
 	agentbootstrap "github.com/opensoha/soha-agent/internal/agent/bootstrap"
+	"github.com/opensoha/soha-agent/internal/agent/buildinfo"
 	"go.uber.org/zap"
 )
 
 func main() {
+	if shouldPrintVersion(os.Args[1:]) {
+		fmt.Println(buildinfo.Human())
+		return
+	}
+
 	ctx := context.Background()
 	application, err := agentbootstrap.New(ctx)
 	if err != nil {
@@ -38,5 +44,17 @@ func main() {
 	if err := application.Shutdown(shutdownCtx); err != nil {
 		application.Logger.Error("agent graceful shutdown failed", zap.Error(err))
 		os.Exit(1)
+	}
+}
+
+func shouldPrintVersion(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "version", "--version", "-version", "-v":
+		return true
+	default:
+		return false
 	}
 }

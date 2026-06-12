@@ -7,6 +7,11 @@ http:
   base_path: /api/v1
   read_timeout: 15s
   write_timeout: 15s
+  allowed_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+    - http://localhost:8080
+    - http://127.0.0.1:8080
 
 logger:
   level: debug
@@ -15,6 +20,31 @@ logger:
 auth:
   bearer_token: demo-agent-token
 
+security:
+  allowed_actions:
+    - platform.pods.exec
+    - platform.deployments.restart
+    - platform.deployments.scale
+    - platform.deployments.image
+    - platform.deployments.rollback
+    - platform.resources.apply
+    - platform.resources.delete
+    - platform.custom_resources.list
+    - platform.custom_resources.create
+    - platform.custom_resources.apply
+    - platform.custom_resources.delete
+    - platform.port_forwards.create
+    - platform.port_forwards.tunnel
+    - platform.port_forwards.delete
+    - platform.helm_releases.install
+    - platform.helm_releases.values_update
+    - platform.helm_releases.delete
+    - runtime.execution_tasks.cancel
+    - docker.runtime.terminal
+
+audit:
+  file_path: ./.soha/audit/actions.jsonl
+
 control_plane:
   enabled: true
   base_url: http://127.0.0.1:8080
@@ -22,6 +52,11 @@ control_plane:
   agent_id: local-agent
   runtime_endpoint: http://127.0.0.1:18080
   poll_interval: 5s
+  max_concurrency: 1
+  default_timeout: 30m
+  callback_retry:
+    max_attempts: 3
+    backoff: 500ms
   provider_kinds:
     - ci_agent_runner
   workspace_root: .

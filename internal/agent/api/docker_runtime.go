@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -24,6 +26,7 @@ import (
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
 	apiresponse "github.com/opensoha/soha-agent/internal/api/response"
 	domaindocker "github.com/opensoha/soha-agent/internal/domain/docker"
+	"go.uber.org/zap"
 	"sigs.k8s.io/yaml"
 )
 
@@ -38,7 +41,6 @@ const (
 
 var (
 	dockerRuntimeServiceNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	dockerRuntimeUpgrader           = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 )
 
 type dockerRuntimeRequest struct {
@@ -80,13 +82,17 @@ func (w dockerRuntimeFlushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func registerDockerRuntimeRoutes(router *gin.Engine, cfg cfgpkg.Config) {
+func registerDockerRuntimeRoutes(router *gin.Engine, cfg cfgpkg.Config, logger *zap.Logger, actions actionPolicy) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	upgrader := websocket.Upgrader{CheckOrigin: dockerRuntimeOriginChecker(cfg.HTTP.AllowedOrigins)}
 	group := router.Group(fmt.Sprintf("%s/docker/runtime", cfg.HTTP.BasePath))
 	group.Use(authRequiredAnyMiddleware(cfg.Auth.BearerToken, cfg.ControlPlane.BearerToken))
 	{
 		group.POST("/logs", handleDockerRuntimeLogs)
 		group.POST("/logs/stream", handleDockerRuntimeLogStream)
-		group.GET("/terminal", handleDockerRuntimeTerminal)
+		group.GET("/terminal", actions.Require(actionDockerRuntimeTerminal), handleDockerRuntimeTerminal(upgrader))
 		group.POST("/volumes", handleDockerRuntimeVolumes)
 		group.POST("/volume-files", handleDockerRuntimeVolumeFiles)
 		group.POST("/volume-file", handleDockerRuntimeVolumeFile)
@@ -144,111 +150,113 @@ func handleDockerRuntimeLogStream(c *gin.Context) {
 	}
 }
 
-func handleDockerRuntimeTerminal(c *gin.Context) {
-	conn, err := dockerRuntimeUpgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
+func handleDockerRuntimeTerminal(upgrader websocket.Upgrader) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
 
-	var initMessage dockerRuntimeMessage
-	if err := conn.ReadJSON(&initMessage); err != nil {
-		_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: "terminal init message is required"})
-		return
-	}
-	if initMessage.Type != "init" || strings.TrimSpace(initMessage.Data) == "" {
-		_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: "terminal init message is required"})
-		return
-	}
-	var req dockerRuntimeRequest
-	if err := json.Unmarshal([]byte(initMessage.Data), &req); err != nil {
-		_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: "invalid terminal init payload"})
-		return
-	}
-	if err := validateDockerRuntimeRequest(req); err != nil {
-		_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
-		return
-	}
-	workspace, cleanup, err := prepareDockerRuntimeWorkspace(req)
-	if err != nil {
-		_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
-		return
-	}
-	defer cleanup()
+		var initMessage dockerRuntimeMessage
+		if err := conn.ReadJSON(&initMessage); err != nil {
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: "terminal init message is required"})
+			return
+		}
+		if initMessage.Type != "init" || strings.TrimSpace(initMessage.Data) == "" {
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: "terminal init message is required"})
+			return
+		}
+		var req dockerRuntimeRequest
+		if err := json.Unmarshal([]byte(initMessage.Data), &req); err != nil {
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: "invalid terminal init payload"})
+			return
+		}
+		if err := validateDockerRuntimeRequest(req); err != nil {
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			return
+		}
+		workspace, cleanup, err := prepareDockerRuntimeWorkspace(req)
+		if err != nil {
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			return
+		}
+		defer cleanup()
 
-	ctx, cancel := context.WithCancel(c.Request.Context())
-	defer cancel()
-	shell := normalizeDockerRuntimeShell(req.Shell)
-	args := append(dockerRuntimeComposeArgs(workspace, "exec", "-T"), req.ServiceName, shell)
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Dir = workspace.Dir
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
-		return
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
-		return
-	}
+		ctx, cancel := context.WithCancel(c.Request.Context())
+		defer cancel()
+		shell := normalizeDockerRuntimeShell(req.Shell)
+		args := append(dockerRuntimeComposeArgs(workspace, "exec", "-T"), req.ServiceName, shell)
+		cmd := exec.CommandContext(ctx, "docker", args...)
+		cmd.Dir = workspace.Dir
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			return
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			return
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			return
+		}
+		if err := cmd.Start(); err != nil {
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			return
+		}
 
-	var writeMu sync.Mutex
-	write := func(message dockerRuntimeMessage) bool {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		return conn.WriteJSON(message) == nil
-	}
-	go pipeDockerRuntimeOutput(stdout, func(data string) bool {
-		return write(dockerRuntimeMessage{Type: "stdout", Data: data})
-	})
-	go pipeDockerRuntimeOutput(stderr, func(data string) bool {
-		return write(dockerRuntimeMessage{Type: "stderr", Data: data})
-	})
+		var writeMu sync.Mutex
+		write := func(message dockerRuntimeMessage) bool {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			return conn.WriteJSON(message) == nil
+		}
+		go pipeDockerRuntimeOutput(stdout, func(data string) bool {
+			return write(dockerRuntimeMessage{Type: "stdout", Data: data})
+		})
+		go pipeDockerRuntimeOutput(stderr, func(data string) bool {
+			return write(dockerRuntimeMessage{Type: "stderr", Data: data})
+		})
 
-	readDone := make(chan struct{})
-	go func() {
-		defer close(readDone)
-		defer stdin.Close()
-		for {
-			var message dockerRuntimeMessage
-			if err := conn.ReadJSON(&message); err != nil {
-				cancel()
-				return
-			}
-			switch message.Type {
-			case "input":
-				if _, err := io.WriteString(stdin, message.Data); err != nil {
+		readDone := make(chan struct{})
+		go func() {
+			defer close(readDone)
+			defer stdin.Close()
+			for {
+				var message dockerRuntimeMessage
+				if err := conn.ReadJSON(&message); err != nil {
 					cancel()
 					return
 				}
-			case "close":
-				cancel()
-				return
+				switch message.Type {
+				case "input":
+					if _, err := io.WriteString(stdin, message.Data); err != nil {
+						cancel()
+						return
+					}
+				case "close":
+					cancel()
+					return
+				}
 			}
-		}
-	}()
+		}()
 
-	waitErr := cmd.Wait()
-	select {
-	case <-readDone:
-	default:
-		cancel()
+		waitErr := cmd.Wait()
+		select {
+		case <-readDone:
+		default:
+			cancel()
+		}
+		if waitErr != nil && ctx.Err() == nil {
+			_ = write(dockerRuntimeMessage{Type: "error", Message: waitErr.Error()})
+			return
+		}
+		_ = write(dockerRuntimeMessage{Type: "exit", Message: "terminal session closed"})
 	}
-	if waitErr != nil && ctx.Err() == nil {
-		_ = write(dockerRuntimeMessage{Type: "error", Message: waitErr.Error()})
-		return
-	}
-	_ = write(dockerRuntimeMessage{Type: "exit", Message: "terminal session closed"})
 }
 
 func handleDockerRuntimeVolumes(c *gin.Context) {
@@ -749,6 +757,58 @@ func boolValueAny(value any) bool {
 	default:
 		return false
 	}
+}
+
+func dockerRuntimeOriginChecker(allowedOrigins []string) func(*http.Request) bool {
+	allowed := normalizeDockerRuntimeAllowedOrigins(allowedOrigins)
+	return func(r *http.Request) bool {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin == "" {
+			return true
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return false
+		}
+		if _, ok := allowed[dockerRuntimeOriginKey(parsed)]; ok {
+			return true
+		}
+		if strings.EqualFold(parsed.Host, r.Host) {
+			return true
+		}
+		requestHost := dockerRuntimeHostName(r.Host)
+		originHost := dockerRuntimeHostName(parsed.Host)
+		return dockerRuntimeIsLocalHost(requestHost) && dockerRuntimeIsLocalHost(originHost)
+	}
+}
+
+func normalizeDockerRuntimeAllowedOrigins(values []string) map[string]struct{} {
+	allowed := map[string]struct{}{}
+	for _, value := range values {
+		parsed, err := url.Parse(strings.TrimSpace(value))
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			continue
+		}
+		allowed[dockerRuntimeOriginKey(parsed)] = struct{}{}
+	}
+	return allowed
+}
+
+func dockerRuntimeOriginKey(parsed *url.URL) string {
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
+}
+
+func dockerRuntimeHostName(hostport string) string {
+	host, _, err := net.SplitHostPort(hostport)
+	if err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(hostport, "[]")
+}
+
+func dockerRuntimeIsLocalHost(host string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(host))
+	return normalized == "localhost" || normalized == "127.0.0.1" || normalized == "::1" || strings.HasSuffix(normalized, ".localhost")
 }
 
 func shellQuote(value string) string {

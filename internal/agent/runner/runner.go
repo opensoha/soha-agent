@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,9 @@ import (
 const (
 	commandHeartbeatInterval = 10 * time.Second
 	runnerStatusPollInterval = 2 * time.Second
+	metricScopeExecution     = "execution"
+	metricScopeDocker        = "docker"
+	metricScopeAgentRuntime  = "agent_runtime"
 )
 
 var agentRunHeartbeatInterval = commandHeartbeatInterval
@@ -92,11 +96,13 @@ type checkoutSpec struct {
 }
 
 type Runner struct {
-	cfg        cfgpkg.ControlPlaneConfig
-	httpClient *http.Client
-	logger     *zap.Logger
-	mu         sync.RWMutex
-	active     map[string]*activeTaskState
+	cfg            cfgpkg.ControlPlaneConfig
+	httpClient     *http.Client
+	logger         *zap.Logger
+	executionSlots chan struct{}
+	mu             sync.RWMutex
+	active         map[string]*activeTaskState
+	metrics        *runnerMetrics
 }
 
 type ActiveTask struct {
@@ -121,17 +127,82 @@ type activeTaskState struct {
 	cancel   context.CancelFunc
 }
 
+type MetricsSnapshot struct {
+	ActiveTasks  int                  `json:"activeTasks"`
+	Execution    RunnerMetricSnapshot `json:"execution"`
+	Docker       RunnerMetricSnapshot `json:"docker"`
+	AgentRuntime RunnerMetricSnapshot `json:"agentRuntime"`
+}
+
+type RunnerMetricSnapshot struct {
+	Claims           int64  `json:"claims"`
+	ClaimMisses      int64  `json:"claimMisses"`
+	Started          int64  `json:"started"`
+	Heartbeats       int64  `json:"heartbeats"`
+	CallbackAttempts int64  `json:"callbackAttempts"`
+	CallbackFailures int64  `json:"callbackFailures"`
+	FinalCallbacks   int64  `json:"finalCallbacks"`
+	Completed        int64  `json:"completed"`
+	Failed           int64  `json:"failed"`
+	Canceled         int64  `json:"canceled"`
+	TimedOut         int64  `json:"timedOut"`
+	Denied           int64  `json:"denied"`
+	LastHeartbeatAt  string `json:"lastHeartbeatAt,omitempty"`
+	LastCallbackAt   string `json:"lastCallbackAt,omitempty"`
+}
+
+type runnerMetrics struct {
+	mu           sync.RWMutex
+	execution    runnerMetricSet
+	docker       runnerMetricSet
+	agentRuntime runnerMetricSet
+}
+
+type runnerMetricSet struct {
+	claims           int64
+	claimMisses      int64
+	started          int64
+	heartbeats       int64
+	callbackAttempts int64
+	callbackFailures int64
+	finalCallbacks   int64
+	completed        int64
+	failed           int64
+	canceled         int64
+	timedOut         int64
+	denied           int64
+	lastHeartbeatAt  string
+	lastCallbackAt   string
+}
+
 func New(cfg cfgpkg.ControlPlaneConfig, logger *zap.Logger) *Runner {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 5 * time.Second
+	}
+	if cfg.MaxConcurrency <= 0 {
+		cfg.MaxConcurrency = 1
+	}
+	if cfg.DefaultTimeout <= 0 {
+		cfg.DefaultTimeout = 30 * time.Minute
+	}
+	if cfg.CallbackRetry.MaxAttempts <= 0 {
+		cfg.CallbackRetry.MaxAttempts = 3
+	}
+	if cfg.CallbackRetry.Backoff <= 0 {
+		cfg.CallbackRetry.Backoff = 500 * time.Millisecond
+	}
+	if logger == nil {
+		logger = zap.NewNop()
 	}
 	return &Runner{
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
-		logger: logger,
-		active: map[string]*activeTaskState{},
+		logger:         logger,
+		executionSlots: make(chan struct{}, cfg.MaxConcurrency),
+		active:         map[string]*activeTaskState{},
+		metrics:        &runnerMetrics{},
 	}
 }
 
@@ -141,6 +212,154 @@ func (r *Runner) apiClient() *sohaapi.Client {
 		sohaapi.WithBearerToken(r.cfg.BearerToken),
 		sohaapi.WithHTTPClient(r.httpClient),
 	)
+}
+
+func (r *Runner) tryAcquireExecutionSlot() bool {
+	if r == nil || r.executionSlots == nil {
+		return true
+	}
+	select {
+	case r.executionSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Runner) releaseExecutionSlot() {
+	if r == nil || r.executionSlots == nil {
+		return
+	}
+	select {
+	case <-r.executionSlots:
+	default:
+	}
+}
+
+func (r *Runner) MetricsSnapshot() MetricsSnapshot {
+	activeTasks := 0
+	if r != nil {
+		r.mu.RLock()
+		activeTasks = len(r.active)
+		r.mu.RUnlock()
+	}
+	if r == nil || r.metrics == nil {
+		return MetricsSnapshot{ActiveTasks: activeTasks}
+	}
+	return r.metrics.snapshot(activeTasks)
+}
+
+func (m *runnerMetrics) snapshot(activeTasks int) MetricsSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return MetricsSnapshot{
+		ActiveTasks:  activeTasks,
+		Execution:    m.execution.snapshot(),
+		Docker:       m.docker.snapshot(),
+		AgentRuntime: m.agentRuntime.snapshot(),
+	}
+}
+
+func (m *runnerMetrics) markClaim(scope string, hit bool) {
+	m.withScope(scope, func(current *runnerMetricSet) {
+		if hit {
+			current.claims++
+			return
+		}
+		current.claimMisses++
+	})
+}
+
+func (m *runnerMetrics) markStarted(scope string) {
+	m.withScope(scope, func(current *runnerMetricSet) {
+		current.started++
+	})
+}
+
+func (m *runnerMetrics) markHeartbeat(scope string) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	m.withScope(scope, func(current *runnerMetricSet) {
+		current.heartbeats++
+		current.lastHeartbeatAt = now
+	})
+}
+
+func (m *runnerMetrics) markCallbackAttempt(scope string) {
+	m.withScope(scope, func(current *runnerMetricSet) {
+		current.callbackAttempts++
+	})
+}
+
+func (m *runnerMetrics) markCallbackFailure(scope string) {
+	m.withScope(scope, func(current *runnerMetricSet) {
+		current.callbackFailures++
+	})
+}
+
+func (m *runnerMetrics) markCallbackSuccess(scope, status string) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	m.withScope(scope, func(current *runnerMetricSet) {
+		current.lastCallbackAt = now
+		if strings.TrimSpace(status) == "running" {
+			current.heartbeats++
+			current.lastHeartbeatAt = now
+		}
+		if isFinalStatus(status) {
+			current.finalCallbacks++
+		}
+	})
+}
+
+func (m *runnerMetrics) markOutcome(scope, status string) {
+	m.withScope(scope, func(current *runnerMetricSet) {
+		switch strings.TrimSpace(status) {
+		case "completed":
+			current.completed++
+		case "failed":
+			current.failed++
+		case "canceled":
+			current.canceled++
+		case "callback_timeout":
+			current.timedOut++
+		case "denied":
+			current.denied++
+		}
+	})
+}
+
+func (m *runnerMetrics) withScope(scope string, mutate func(*runnerMetricSet)) {
+	if m == nil || mutate == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch scope {
+	case metricScopeDocker:
+		mutate(&m.docker)
+	case metricScopeAgentRuntime:
+		mutate(&m.agentRuntime)
+	default:
+		mutate(&m.execution)
+	}
+}
+
+func (s runnerMetricSet) snapshot() RunnerMetricSnapshot {
+	return RunnerMetricSnapshot{
+		Claims:           s.claims,
+		ClaimMisses:      s.claimMisses,
+		Started:          s.started,
+		Heartbeats:       s.heartbeats,
+		CallbackAttempts: s.callbackAttempts,
+		CallbackFailures: s.callbackFailures,
+		FinalCallbacks:   s.finalCallbacks,
+		Completed:        s.completed,
+		Failed:           s.failed,
+		Canceled:         s.canceled,
+		TimedOut:         s.timedOut,
+		Denied:           s.denied,
+		LastHeartbeatAt:  s.lastHeartbeatAt,
+		LastCallbackAt:   s.lastCallbackAt,
+	}
 }
 
 func (r *Runner) Start(ctx context.Context) {
@@ -165,11 +384,18 @@ func (r *Runner) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			task, ok := r.claim(ctx)
-			if !ok {
+			if !r.tryAcquireExecutionSlot() {
 				continue
 			}
-			r.execute(ctx, task)
+			task, ok := r.claim(ctx)
+			if !ok {
+				r.releaseExecutionSlot()
+				continue
+			}
+			go func(current ExecutionTask) {
+				defer r.releaseExecutionSlot()
+				r.execute(ctx, current)
+			}(task)
 		}
 	}
 }
@@ -231,11 +457,14 @@ func (r *Runner) claim(ctx context.Context) (ExecutionTask, bool) {
 		RuntimeEndpoint: strings.TrimSpace(r.cfg.RuntimeEndpoint),
 	})
 	if err != nil {
+		r.metrics.markClaim(metricScopeExecution, false)
 		return ExecutionTask{}, false
 	}
 	if strings.TrimSpace(task.ID) == "" {
+		r.metrics.markClaim(metricScopeExecution, false)
 		return ExecutionTask{}, false
 	}
+	r.metrics.markClaim(metricScopeExecution, true)
 	return task, true
 }
 
@@ -246,40 +475,53 @@ func (r *Runner) claimAgentRun(ctx context.Context) (AgentRun, bool) {
 		Kinds:       r.cfg.AgentRuntime.ProviderKinds,
 	})
 	if err != nil {
+		r.metrics.markClaim(metricScopeAgentRuntime, false)
 		return AgentRun{}, false
 	}
 	if strings.TrimSpace(run.ID) == "" {
+		r.metrics.markClaim(metricScopeAgentRuntime, false)
 		return AgentRun{}, false
 	}
+	r.metrics.markClaim(metricScopeAgentRuntime, true)
 	return run, true
 }
 
 func (r *Runner) claimDockerOperation(ctx context.Context) (DockerOperation, bool) {
 	workerID := dockerWorkerID(r.cfg)
+	operationKinds := normalizeDockerOperationKinds(r.cfg.Docker.OperationKinds)
+	if len(operationKinds) == 0 {
+		r.metrics.markClaim(metricScopeDocker, false)
+		return DockerOperation{}, false
+	}
 	operation, err := r.apiClient().ClaimDockerOperation(ctx, dockerClaimRequest{
 		WorkerID:       workerID,
 		AgentID:        firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent"),
 		HostIDs:        r.cfg.Docker.HostIDs,
-		OperationKinds: r.cfg.Docker.OperationKinds,
+		OperationKinds: operationKinds,
 	})
 	if err != nil {
+		r.metrics.markClaim(metricScopeDocker, false)
 		return DockerOperation{}, false
 	}
 	if strings.TrimSpace(operation.ID) == "" {
+		r.metrics.markClaim(metricScopeDocker, false)
 		return DockerOperation{}, false
 	}
+	r.metrics.markClaim(metricScopeDocker, true)
 	return operation, true
 }
 
 func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
-	taskCtx, cancelTask := context.WithCancel(ctx)
+	taskCtx, cancelTask := r.executionTaskContext(ctx, task)
 	defer cancelTask()
+	r.metrics.markStarted(metricScopeExecution)
 	commands := extractCommands(task.Payload)
 	if len(commands) == 0 {
-		r.callback(taskCtx, task, "failed", map[string]any{
+		r.finalCallback(ctx, task, "failed", map[string]any{
 			"logs":  []string{"no executable commands were found in task payload"},
 			"error": "no executable commands were found in task payload",
 		})
+		r.metrics.markOutcome(metricScopeExecution, "failed")
 		return
 	}
 
@@ -310,17 +552,30 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 		}
 	}
 	if workspaceErr != nil {
-		r.updateActiveTask(task.ID, func(item *ActiveTask) {
-			item.Status = "failed"
-			item.WorkspacePath = workspacePath
-			item.StopReason = workspaceErr.Error()
-		})
-		r.callback(taskCtx, task, "failed", map[string]any{
-			"logs":          []string{workspaceErr.Error()},
-			"error":         workspaceErr.Error(),
+		status := "failed"
+		errorMessage := workspaceErr.Error()
+		payload := map[string]any{
+			"logs":          []string{errorMessage},
+			"error":         errorMessage,
 			"agentId":       agentID,
 			"workspacePath": workspacePath,
+		}
+		if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+			timeout := r.executionTaskTimeout(task)
+			status = "callback_timeout"
+			errorMessage = fmt.Sprintf("execution task timed out after %s", timeout)
+			payload["logs"] = []string{errorMessage}
+			payload["error"] = errorMessage
+			payload["timeoutSeconds"] = ceilDurationSeconds(timeout)
+			payload["timeout"] = timeout.String()
+		}
+		r.updateActiveTask(task.ID, func(item *ActiveTask) {
+			item.Status = status
+			item.WorkspacePath = workspacePath
+			item.StopReason = errorMessage
 		})
+		r.finalCallback(ctx, task, status, payload)
+		r.metrics.markOutcome(metricScopeExecution, status)
 		return
 	}
 
@@ -387,13 +642,52 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 					item.StopSource = stopSource
 					item.StopReason = stopReason
 				})
-				r.callback(ctx, task, "canceled", map[string]any{
+				r.finalCallback(ctx, task, "canceled", map[string]any{
 					"agentId":       agentID,
 					"workspacePath": workspacePath,
 					"canceledAt":    time.Now().UTC().Format(time.RFC3339),
 					"cancelReason":  stopReason,
 				})
+				r.metrics.markOutcome(metricScopeExecution, "canceled")
 			}
+			return
+		}
+		if errors.Is(taskCtx.Err(), context.Canceled) {
+			stopSource, stopReason := r.stopInfo(task.ID)
+			if stopSource == "local_api" {
+				r.updateActiveTask(task.ID, func(item *ActiveTask) {
+					item.Status = "canceled"
+					item.StopSource = stopSource
+					item.StopReason = stopReason
+				})
+				r.finalCallback(ctx, task, "canceled", map[string]any{
+					"agentId":       agentID,
+					"workspacePath": workspacePath,
+					"canceledAt":    time.Now().UTC().Format(time.RFC3339),
+					"cancelReason":  stopReason,
+				})
+				r.metrics.markOutcome(metricScopeExecution, "canceled")
+				return
+			}
+		}
+		if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+			timeout := r.executionTaskTimeout(task)
+			timeoutSeconds := ceilDurationSeconds(timeout)
+			message := fmt.Sprintf("execution task timed out after %s", timeout)
+			r.updateActiveTask(task.ID, func(item *ActiveTask) {
+				item.Status = "callback_timeout"
+				item.StopReason = message
+			})
+			r.finalCallback(ctx, task, "callback_timeout", map[string]any{
+				"logs":           []string{message},
+				"error":          message,
+				"agentId":        agentID,
+				"currentCommand": command,
+				"workspacePath":  workspacePath,
+				"timeoutSeconds": timeoutSeconds,
+				"timeout":        timeout.String(),
+			})
+			r.metrics.markOutcome(metricScopeExecution, "callback_timeout")
 			return
 		}
 		if err != nil {
@@ -404,13 +698,14 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 				item.Status = "failed"
 				item.StopReason = err.Error()
 			})
-			r.callback(taskCtx, task, "failed", map[string]any{
+			r.finalCallback(ctx, task, "failed", map[string]any{
 				"logs":           []string{fmt.Sprintf("command failed: %v", err)},
 				"error":          err.Error(),
 				"agentId":        agentID,
 				"currentCommand": command,
 				"workspacePath":  workspacePath,
 			})
+			r.metrics.markOutcome(metricScopeExecution, "failed")
 			return
 		}
 	}
@@ -433,11 +728,28 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 		item.CurrentCommand = ""
 		item.StopReason = ""
 	})
-	r.callback(taskCtx, task, "completed", payload)
+	r.finalCallback(ctx, task, "completed", payload)
+	r.metrics.markOutcome(metricScopeExecution, "completed")
 }
 
 func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOperation) {
 	workerID := dockerWorkerID(r.cfg)
+	r.metrics.markStarted(metricScopeDocker)
+	if !dockerOperationKindAllowed(r.cfg.Docker.OperationKinds, operation.OperationKind) {
+		err := fmt.Errorf("docker operation kind %q is not allowlisted", operation.OperationKind)
+		r.logger.Warn("docker operation denied",
+			zap.String("operation_id", operation.ID),
+			zap.String("operation_kind", operation.OperationKind),
+			zap.String("worker_id", workerID),
+			zap.String("reason", err.Error()),
+		)
+		r.dockerCallback(ctx, operation, "failed", dockerRuntimePayload(ctx, r.cfg, map[string]any{
+			"error":    err.Error(),
+			"workerId": workerID,
+		}), []string{"docker operation denied: " + err.Error()})
+		r.metrics.markOutcome(metricScopeDocker, "denied")
+		return
+	}
 	timeoutSeconds := operation.TimeoutSeconds
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 1800
@@ -481,6 +793,7 @@ func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOpe
 			"error":    err.Error(),
 			"workerId": workerID,
 		}), append(logs, "docker operation failed: "+err.Error()))
+		r.metrics.markOutcome(metricScopeDocker, status)
 		return
 	}
 
@@ -494,6 +807,7 @@ func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOpe
 		}
 	}
 	r.dockerCallback(ctx, operation, "completed", payload, logs)
+	r.metrics.markOutcome(metricScopeDocker, "completed")
 }
 
 func (r *Runner) streamDockerHeartbeats(ctx context.Context, cancel context.CancelFunc, done <-chan struct{}, stopReason chan<- string, operation DockerOperation) {
@@ -531,6 +845,7 @@ func (r *Runner) streamDockerHeartbeats(ctx context.Context, cancel context.Canc
 func (r *Runner) executeAgentRun(ctx context.Context, run AgentRun) {
 	workerID := agentRuntimeWorkerID(r.cfg)
 	startedAt := time.Now().UTC()
+	r.metrics.markStarted(metricScopeAgentRuntime)
 	if remoteRun, ok := r.agentRunCallback(ctx, run, "running", map[string]any{
 		"agentId":     firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent"),
 		"workerId":    workerID,
@@ -578,6 +893,7 @@ func (r *Runner) executeAgentRun(ctx context.Context, run AgentRun) {
 			"error":      safeErrorMessage,
 			"providerId": run.ProviderID,
 		}, []map[string]any{toolExecution}, []map[string]any{artifact}, "", safeErrorMessage)
+		r.metrics.markOutcome(metricScopeAgentRuntime, status)
 		return
 	}
 	completedAt := time.Now().UTC()
@@ -593,6 +909,7 @@ func (r *Runner) executeAgentRun(ctx context.Context, run AgentRun) {
 		"logs":        logs,
 	}
 	r.agentRunCallback(ctx, run, "completed", payload, []map[string]any{toolExecution}, []map[string]any{artifact}, firstNonEmpty(stringMapValue(output, "externalRunId"), run.ID), "")
+	r.metrics.markOutcome(metricScopeAgentRuntime, "completed")
 }
 
 func (r *Runner) streamAgentRunHeartbeats(ctx context.Context, cancel context.CancelFunc, done <-chan struct{}, stopReason chan<- string, run AgentRun, workerID string) {
@@ -980,12 +1297,20 @@ func (r *Runner) CancelActiveTask(taskID, reason string) bool {
 }
 
 func (r *Runner) callback(ctx context.Context, task ExecutionTask, status string, payload map[string]any) (ExecutionTask, bool) {
-	result, err := r.apiClient().RecordExecutionCallback(ctx, callbackRequest{
-		CallbackToken: task.CallbackToken,
-		Status:        status,
-		Payload:       payload,
+	var result ExecutionTask
+	ok := r.withCallbackRetry(ctx, metricScopeExecution, status, func() error {
+		next, err := r.apiClient().RecordExecutionCallback(ctx, callbackRequest{
+			CallbackToken: task.CallbackToken,
+			Status:        status,
+			Payload:       payload,
+		})
+		if err != nil {
+			return err
+		}
+		result = next
+		return nil
 	})
-	if err != nil {
+	if !ok {
 		return ExecutionTask{}, false
 	}
 	if strings.TrimSpace(result.ID) == "" {
@@ -994,15 +1319,29 @@ func (r *Runner) callback(ctx context.Context, task ExecutionTask, status string
 	return result, true
 }
 
+func (r *Runner) finalCallback(ctx context.Context, task ExecutionTask, status string, payload map[string]any) (ExecutionTask, bool) {
+	finalCtx, cancel := r.finalCallbackContext()
+	defer cancel()
+	return r.callback(finalCtx, task, status, payload)
+}
+
 func (r *Runner) dockerCallback(ctx context.Context, operation DockerOperation, status string, payload map[string]any, logs []string) (DockerOperation, bool) {
-	result, err := r.apiClient().RecordDockerOperationCallback(ctx, dockerCallbackRequest{
-		OperationID: operation.ID,
-		WorkerID:    dockerWorkerID(r.cfg),
-		Status:      status,
-		Payload:     payload,
-		Logs:        logs,
+	var result DockerOperation
+	ok := r.withCallbackRetry(ctx, metricScopeDocker, status, func() error {
+		next, err := r.apiClient().RecordDockerOperationCallback(ctx, dockerCallbackRequest{
+			OperationID: operation.ID,
+			WorkerID:    dockerWorkerID(r.cfg),
+			Status:      status,
+			Payload:     payload,
+			Logs:        logs,
+		})
+		if err != nil {
+			return err
+		}
+		result = next
+		return nil
 	})
-	if err != nil {
+	if !ok {
 		return DockerOperation{}, false
 	}
 	if strings.TrimSpace(result.ID) == "" {
@@ -1012,18 +1351,26 @@ func (r *Runner) dockerCallback(ctx context.Context, operation DockerOperation, 
 }
 
 func (r *Runner) agentRunCallback(ctx context.Context, run AgentRun, status string, payload map[string]any, toolExecutions []map[string]any, analysisArtifacts []map[string]any, externalRunID string, errorMessage string) (AgentRun, bool) {
-	result, err := r.apiClient().RecordAgentRunCallback(ctx, agentRunCallbackRequest{
-		RunID:             run.ID,
-		CallbackToken:     run.CallbackToken,
-		AgentID:           agentRuntimeWorkerID(r.cfg),
-		Status:            status,
-		Payload:           payload,
-		ToolExecutions:    toolExecutions,
-		AnalysisArtifacts: analysisArtifacts,
-		ExternalRunID:     externalRunID,
-		ErrorMessage:      errorMessage,
+	var result AgentRun
+	ok := r.withCallbackRetry(ctx, metricScopeAgentRuntime, status, func() error {
+		next, err := r.apiClient().RecordAgentRunCallback(ctx, agentRunCallbackRequest{
+			RunID:             run.ID,
+			CallbackToken:     run.CallbackToken,
+			AgentID:           agentRuntimeWorkerID(r.cfg),
+			Status:            status,
+			Payload:           payload,
+			ToolExecutions:    toolExecutions,
+			AnalysisArtifacts: analysisArtifacts,
+			ExternalRunID:     externalRunID,
+			ErrorMessage:      errorMessage,
+		})
+		if err != nil {
+			return err
+		}
+		result = next
+		return nil
 	})
-	if err != nil {
+	if !ok {
 		return AgentRun{}, false
 	}
 	if strings.TrimSpace(result.ID) == "" {
@@ -1049,6 +1396,82 @@ func (r *Runner) agentRunToolCall(ctx context.Context, run AgentRun, binding map
 		return AgentToolCallResult{}, false
 	}
 	return result, true
+}
+
+func (r *Runner) withCallbackRetry(ctx context.Context, scope, status string, call func() error) bool {
+	if call == nil {
+		return false
+	}
+	attempts := r.cfg.CallbackRetry.MaxAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	backoff := r.cfg.CallbackRetry.Backoff
+	if backoff <= 0 {
+		backoff = 500 * time.Millisecond
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		r.metrics.markCallbackAttempt(scope)
+		if err := call(); err != nil {
+			lastErr = err
+			r.metrics.markCallbackFailure(scope)
+			if ctx.Err() != nil || attempt == attempts {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(time.Duration(attempt) * backoff):
+			}
+			continue
+		}
+		r.metrics.markCallbackSuccess(scope, status)
+		return true
+	}
+	if lastErr != nil {
+		r.logger.Warn("runner callback failed",
+			zap.String("scope", scope),
+			zap.String("status", status),
+			zap.Int("attempts", attempts),
+			zap.String("reason", lastErr.Error()),
+		)
+	}
+	return false
+}
+
+func (r *Runner) finalCallbackContext() (context.Context, context.CancelFunc) {
+	timeout := r.cfg.CallbackRetry.Backoff
+	if timeout <= 0 {
+		timeout = 500 * time.Millisecond
+	}
+	timeout = timeout * time.Duration(maxInt(r.cfg.CallbackRetry.MaxAttempts, 1)+1)
+	if timeout < 2*time.Second {
+		timeout = 2 * time.Second
+	}
+	if timeout > 30*time.Second {
+		timeout = 30 * time.Second
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+func (r *Runner) executionTaskContext(ctx context.Context, task ExecutionTask) (context.Context, context.CancelFunc) {
+	timeout := r.executionTaskTimeout(task)
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func (r *Runner) executionTaskTimeout(task ExecutionTask) time.Duration {
+	timeout := durationFromPayload(task.Payload, "timeoutSeconds", "timeout_seconds")
+	if timeout <= 0 {
+		timeout = durationFromPayload(task.Payload, "timeout", "timeoutDuration")
+	}
+	if timeout <= 0 {
+		timeout = r.cfg.DefaultTimeout
+	}
+	return timeout
 }
 
 func (r *Runner) fetchRunnerTaskStatus(ctx context.Context, taskID string) (ExecutionTask, bool) {
@@ -1454,12 +1877,13 @@ func (r *Runner) agentProviderCommandSpec(providerKey string) agentProviderComma
 	if spec, ok := r.cfg.AgentRuntime.Providers[providerKey]; ok {
 		return normalizeAgentProviderCommandSpec(spec)
 	}
-	if providerKey == "hermes" {
+	if provider, ok := defaultAgentProviderDefinition(providerKey); ok {
+		spec := provider.DefaultCommand
 		command := strings.TrimSpace(r.cfg.AgentRuntime.HermesCommand)
-		if command == "" {
-			command = "hermes"
+		if command != "" && provider.Kind == "hermes" {
+			spec.Command = command
 		}
-		return agentProviderCommandSpec{Command: command, Args: []string{"chat", "-Q"}, PromptArg: "-q", ProviderSkillArg: "-s"}
+		return spec
 	}
 	return agentProviderCommandSpec{}
 }
@@ -1901,8 +2325,131 @@ func shouldStopLocalExecution(status string) bool {
 	}
 }
 
+func isFinalStatus(status string) bool {
+	return shouldStopLocalExecution(status)
+}
+
+func durationFromPayload(payload map[string]any, keys ...string) time.Duration {
+	for _, key := range keys {
+		raw, ok := payload[key]
+		if !ok || raw == nil {
+			continue
+		}
+		if duration := durationFromAny(raw, key); duration > 0 {
+			return duration
+		}
+	}
+	return 0
+}
+
+func durationFromAny(raw any, key string) time.Duration {
+	switch value := raw.(type) {
+	case time.Duration:
+		return value
+	case int:
+		return secondsDuration(value, key)
+	case int64:
+		return secondsDuration(value, key)
+	case int32:
+		return secondsDuration(value, key)
+	case float64:
+		return secondsDuration(value, key)
+	case float32:
+		return secondsDuration(value, key)
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return 0
+		}
+		if duration, err := time.ParseDuration(trimmed); err == nil {
+			return duration
+		}
+		seconds, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return 0
+		}
+		return secondsDuration(seconds, key)
+	default:
+		return 0
+	}
+}
+
+func secondsDuration(value any, key string) time.Duration {
+	var seconds float64
+	switch typed := value.(type) {
+	case int:
+		seconds = float64(typed)
+	case int64:
+		seconds = float64(typed)
+	case int32:
+		seconds = float64(typed)
+	case float64:
+		seconds = typed
+	case float32:
+		seconds = float64(typed)
+	default:
+		return 0
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	duration := time.Duration(seconds * float64(time.Second))
+	if strings.Contains(strings.ToLower(key), "millis") {
+		duration = time.Duration(seconds * float64(time.Millisecond))
+	}
+	return duration
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func ceilDurationSeconds(duration time.Duration) int {
+	if duration <= 0 {
+		return 0
+	}
+	seconds := int(duration / time.Second)
+	if duration%time.Second != 0 {
+		seconds++
+	}
+	return seconds
+}
+
 func dockerWorkerID(cfg cfgpkg.ControlPlaneConfig) string {
 	return firstNonEmpty(strings.TrimSpace(cfg.Docker.WorkerID), strings.TrimSpace(cfg.AgentID), "local-docker-runner")
+}
+
+func dockerOperationKindAllowed(allowedKinds []string, operationKind string) bool {
+	normalizedKind := strings.TrimSpace(operationKind)
+	if normalizedKind == "" {
+		return false
+	}
+	for _, allowed := range normalizeDockerOperationKinds(allowedKinds) {
+		if allowed == "*" || allowed == normalizedKind {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeDockerOperationKinds(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		normalized := strings.TrimSpace(value)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out
 }
 
 func dockerRuntimePayload(ctx context.Context, cfg cfgpkg.ControlPlaneConfig, extra map[string]any) map[string]any {

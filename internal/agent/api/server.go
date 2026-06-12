@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/opensoha/soha-agent/internal/agent/buildinfo"
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
 	runnerpkg "github.com/opensoha/soha-agent/internal/agent/runner"
@@ -25,6 +26,10 @@ type RuntimeTaskController interface {
 	ListActiveTasks() []runnerpkg.ActiveTask
 	GetActiveTask(string) (runnerpkg.ActiveTask, bool)
 	CancelActiveTask(string, string) bool
+}
+
+type RuntimeMetricsController interface {
+	MetricsSnapshot() runnerpkg.MetricsSnapshot
 }
 
 type restartDeploymentRequest struct {
@@ -61,6 +66,107 @@ type cancelRuntimeTaskRequest struct {
 	Reason string `json:"reason"`
 }
 
+type diagnosticsView struct {
+	Build        buildinfo.Info              `json:"build"`
+	App          diagnosticsAppView          `json:"app"`
+	HTTP         diagnosticsHTTPView         `json:"http"`
+	Security     diagnosticsSecurityView     `json:"security"`
+	Kubernetes   diagnosticsKubernetesView   `json:"kubernetes"`
+	Capabilities diagnosticsCapabilitiesView `json:"capabilities"`
+	ControlPlane diagnosticsControlPlaneView `json:"controlPlane"`
+	Runtime      diagnosticsRuntimeView      `json:"runtime"`
+	Metrics      *runnerpkg.MetricsSnapshot  `json:"metrics,omitempty"`
+}
+
+type diagnosticsAppView struct {
+	Name string `json:"name"`
+	Env  string `json:"env"`
+}
+
+type diagnosticsHTTPView struct {
+	AddrConfigured      bool   `json:"addrConfigured"`
+	BasePath            string `json:"basePath"`
+	AllowedOriginsCount int    `json:"allowedOriginsCount"`
+}
+
+type diagnosticsSecurityView struct {
+	AllowedActionsCount int  `json:"allowedActionsCount"`
+	AuditFileConfigured bool `json:"auditFileConfigured"`
+}
+
+type diagnosticsKubernetesView struct {
+	Enabled              bool   `json:"enabled"`
+	ClientAvailable      bool   `json:"clientAvailable"`
+	ID                   string `json:"id,omitempty"`
+	Name                 string `json:"name,omitempty"`
+	Region               string `json:"region,omitempty"`
+	Environment          string `json:"environment,omitempty"`
+	ContextConfigured    bool   `json:"contextConfigured"`
+	KubeconfigConfigured bool   `json:"kubeconfigConfigured"`
+	KubeconfigDataLoaded bool   `json:"kubeconfigDataLoaded"`
+	LabelsCount          int    `json:"labelsCount"`
+}
+
+type diagnosticsCapabilitiesView struct {
+	Mode          string                      `json:"mode"`
+	Status        string                      `json:"status"`
+	RequiredKeys  []string                    `json:"requiredKeys"`
+	AvailableKeys []string                    `json:"availableKeys,omitempty"`
+	DegradedKeys  []string                    `json:"degradedKeys,omitempty"`
+	Items         []diagnosticsCapabilityItem `json:"items"`
+	Message       string                      `json:"message,omitempty"`
+}
+
+type diagnosticsCapabilityItem struct {
+	Key    string `json:"key"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type diagnosticsControlPlaneView struct {
+	Enabled                   bool     `json:"enabled"`
+	BaseURLConfigured         bool     `json:"baseUrlConfigured"`
+	AgentID                   string   `json:"agentId,omitempty"`
+	RuntimeEndpointConfigured bool     `json:"runtimeEndpointConfigured"`
+	MaxConcurrency            int      `json:"maxConcurrency"`
+	PollInterval              string   `json:"pollInterval,omitempty"`
+	DefaultTimeout            string   `json:"defaultTimeout,omitempty"`
+	ProviderKinds             []string `json:"providerKinds,omitempty"`
+	WorkspaceRootConfigured   bool     `json:"workspaceRootConfigured"`
+	CallbackRetry             struct {
+		MaxAttempts int    `json:"maxAttempts"`
+		Backoff     string `json:"backoff,omitempty"`
+	} `json:"callbackRetry"`
+	Docker       diagnosticsDockerRunnerView `json:"docker"`
+	AgentRuntime diagnosticsAgentRuntimeView `json:"agentRuntime"`
+}
+
+type diagnosticsDockerRunnerView struct {
+	Enabled               bool     `json:"enabled"`
+	WorkerIDConfigured    bool     `json:"workerIdConfigured"`
+	HostCount             int      `json:"hostCount"`
+	OperationKinds        []string `json:"operationKinds,omitempty"`
+	ComposeRootConfigured bool     `json:"composeRootConfigured"`
+	PollInterval          string   `json:"pollInterval,omitempty"`
+}
+
+type diagnosticsAgentRuntimeView struct {
+	Enabled                 bool     `json:"enabled"`
+	WorkerIDConfigured      bool     `json:"workerIdConfigured"`
+	ProviderIDs             []string `json:"providerIds,omitempty"`
+	ProviderKinds           []string `json:"providerKinds,omitempty"`
+	ProviderCount           int      `json:"providerCount"`
+	HermesCommandConfigured bool     `json:"hermesCommandConfigured"`
+	WorkspaceRootConfigured bool     `json:"workspaceRootConfigured"`
+	PollInterval            string   `json:"pollInterval,omitempty"`
+}
+
+type diagnosticsRuntimeView struct {
+	ControllerAvailable bool `json:"controllerAvailable"`
+	ActiveTasks         int  `json:"activeTasks"`
+	MetricsAvailable    bool `json:"metricsAvailable"`
+}
+
 func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime RuntimeTaskController) *Server {
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -69,6 +175,8 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(apiMiddleware.RequestID())
+	auditSink := newActionAuditSink(cfg.Audit, logger)
+	actions := newActionPolicy(cfg.Security, logger, auditSink)
 
 	router.GET("/healthz", func(c *gin.Context) {
 		apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
@@ -76,11 +184,26 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 	router.GET(fmt.Sprintf("%s/healthz", cfg.HTTP.BasePath), func(c *gin.Context) {
 		apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
 	})
+	buildInfoHandler := func(c *gin.Context) {
+		apiresponse.Item(c, http.StatusOK, buildinfo.Current())
+	}
+	router.GET("/version", buildInfoHandler)
+	router.GET(fmt.Sprintf("%s/version", cfg.HTTP.BasePath), buildInfoHandler)
+	router.GET(fmt.Sprintf("%s/build-info", cfg.HTTP.BasePath), buildInfoHandler)
+	router.GET(fmt.Sprintf("%s/diagnostics", cfg.HTTP.BasePath), authAnyMiddleware(cfg.Auth.BearerToken, cfg.ControlPlane.BearerToken), func(c *gin.Context) {
+		apiresponse.Item(c, http.StatusOK, buildDiagnosticsView(cfg, client != nil, runtime))
+	})
 
 	if client != nil {
 		platform := router.Group(fmt.Sprintf("%s/platform", cfg.HTTP.BasePath))
 		platform.Use(authMiddleware(cfg.Auth.BearerToken))
 		{
+			registerResourceYAMLRoutes(platform, client, actions)
+			registerCustomResourceRoutes(platform, client, actions)
+			registerPortForwardRoutes(platform, newPortForwardRegistry(cfg.Kubernetes, kubernetesPortForwardStarter(client)), actions)
+			registerHelmRoutes(platform, client, actions)
+			registerPodStreamRoutes(platform, client)
+			registerPodTerminalRoutes(platform, client, actions)
 			platform.GET("/summary", func(c *gin.Context) {
 				apiresponse.Item(c, http.StatusOK, client.Summary(c.Request.Context()))
 			})
@@ -147,7 +270,7 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 				}
 				apiresponse.Item(c, http.StatusOK, item)
 			})
-			platform.POST("/workloads/pods/:name/exec", func(c *gin.Context) {
+			platform.POST("/workloads/pods/:name/exec", actions.Require(actionPlatformPodsExec), func(c *gin.Context) {
 				namespace := c.DefaultQuery("namespace", "default")
 				var req execPodRequest
 				if err := c.ShouldBindJSON(&req); err != nil || req.Command == "" {
@@ -690,7 +813,7 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 				}
 				apiresponse.Items(c, http.StatusOK, items)
 			})
-			platform.POST("/actions/deployments/restart", func(c *gin.Context) {
+			platform.POST("/actions/deployments/restart", actions.Require(actionPlatformDeploymentRestart), func(c *gin.Context) {
 				var req restartDeploymentRequest
 				if err := c.ShouldBindJSON(&req); err != nil || req.Namespace == "" || req.Name == "" {
 					apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "namespace and name are required")
@@ -702,7 +825,7 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 				}
 				apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
 			})
-			platform.POST("/actions/deployments/scale", func(c *gin.Context) {
+			platform.POST("/actions/deployments/scale", actions.Require(actionPlatformDeploymentScale), func(c *gin.Context) {
 				var req scaleDeploymentRequest
 				if err := c.ShouldBindJSON(&req); err != nil || req.Namespace == "" || req.Name == "" {
 					apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "namespace, name, and replicas are required")
@@ -718,7 +841,7 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 				}
 				apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
 			})
-			platform.POST("/actions/deployments/image", func(c *gin.Context) {
+			platform.POST("/actions/deployments/image", actions.Require(actionPlatformDeploymentImage), func(c *gin.Context) {
 				var req updateDeploymentImageRequest
 				if err := c.ShouldBindJSON(&req); err != nil || req.Namespace == "" || req.Name == "" || req.Image == "" {
 					apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "namespace, name, and image are required")
@@ -734,7 +857,7 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 					"previousImage": previousImage,
 				})
 			})
-			platform.POST("/actions/deployments/rollback", func(c *gin.Context) {
+			platform.POST("/actions/deployments/rollback", actions.Require(actionPlatformDeploymentRollback), func(c *gin.Context) {
 				var req rollbackDeploymentRequest
 				if err := c.ShouldBindJSON(&req); err != nil || req.Namespace == "" || req.Name == "" || req.Revision == "" {
 					apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "namespace, name, and revision are required")
@@ -764,7 +887,7 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 				}
 				apiresponse.Item(c, http.StatusOK, item)
 			})
-			runtimeGroup.POST("/execution-tasks/:taskID/cancel", func(c *gin.Context) {
+			runtimeGroup.POST("/execution-tasks/:taskID/cancel", actions.Require(actionRuntimeExecutionTaskCancel), func(c *gin.Context) {
 				var req cancelRuntimeTaskRequest
 				_ = c.ShouldBindJSON(&req)
 				if !runtime.CancelActiveTask(c.Param("taskID"), req.Reason) {
@@ -773,15 +896,22 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 				}
 				apiresponse.JSON(c, http.StatusAccepted, gin.H{"status": "canceling"})
 			})
+			if metrics, ok := runtime.(RuntimeMetricsController); ok {
+				runtimeGroup.GET("/metrics", func(c *gin.Context) {
+					apiresponse.Item(c, http.StatusOK, metrics.MetricsSnapshot())
+				})
+			}
 		}
 	}
 
-	registerDockerRuntimeRoutes(router, cfg)
+	registerDockerRuntimeRoutes(router, cfg, logger, actions)
 
 	logger.Info("agent server configured",
 		zap.String("addr", cfg.HTTP.Addr),
 		zap.String("base_path", cfg.HTTP.BasePath),
 		zap.String("cluster_id", cfg.Kubernetes.ID),
+		zap.String("version", buildinfo.Current().Version),
+		zap.String("commit", buildinfo.Current().Commit),
 	)
 
 	return &Server{httpServer: &http.Server{
@@ -791,6 +921,198 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 		ReadTimeout:       cfg.HTTP.ReadTimeout,
 		WriteTimeout:      cfg.HTTP.WriteTimeout,
 	}}
+}
+
+func buildDiagnosticsView(cfg cfgpkg.Config, kubernetesClientAvailable bool, runtime RuntimeTaskController) diagnosticsView {
+	view := diagnosticsView{
+		Build: buildinfo.Current(),
+		App: diagnosticsAppView{
+			Name: cfg.App.Name,
+			Env:  cfg.App.Env,
+		},
+		HTTP: diagnosticsHTTPView{
+			AddrConfigured:      strings.TrimSpace(cfg.HTTP.Addr) != "",
+			BasePath:            cfg.HTTP.BasePath,
+			AllowedOriginsCount: len(cfg.HTTP.AllowedOrigins),
+		},
+		Security: diagnosticsSecurityView{
+			AllowedActionsCount: len(cfg.Security.AllowedActions),
+			AuditFileConfigured: strings.TrimSpace(cfg.Audit.FilePath) != "",
+		},
+		Kubernetes: diagnosticsKubernetesView{
+			Enabled:              cfg.Kubernetes.Enabled,
+			ClientAvailable:      kubernetesClientAvailable,
+			ID:                   cfg.Kubernetes.ID,
+			Name:                 cfg.Kubernetes.Name,
+			Region:               cfg.Kubernetes.Region,
+			Environment:          cfg.Kubernetes.Environment,
+			ContextConfigured:    strings.TrimSpace(cfg.Kubernetes.Context) != "",
+			KubeconfigConfigured: strings.TrimSpace(cfg.Kubernetes.Kubeconfig) != "",
+			KubeconfigDataLoaded: strings.TrimSpace(cfg.Kubernetes.KubeconfigData) != "",
+			LabelsCount:          len(cfg.Kubernetes.Labels),
+		},
+		Capabilities: buildDiagnosticsCapabilitiesView(cfg, kubernetesClientAvailable),
+		ControlPlane: diagnosticsControlPlaneView{
+			Enabled:                   cfg.ControlPlane.Enabled,
+			BaseURLConfigured:         strings.TrimSpace(cfg.ControlPlane.BaseURL) != "",
+			AgentID:                   cfg.ControlPlane.AgentID,
+			RuntimeEndpointConfigured: strings.TrimSpace(cfg.ControlPlane.RuntimeEndpoint) != "",
+			MaxConcurrency:            cfg.ControlPlane.MaxConcurrency,
+			PollInterval:              durationString(cfg.ControlPlane.PollInterval),
+			DefaultTimeout:            durationString(cfg.ControlPlane.DefaultTimeout),
+			ProviderKinds:             append([]string(nil), cfg.ControlPlane.ProviderKinds...),
+			WorkspaceRootConfigured:   strings.TrimSpace(cfg.ControlPlane.WorkspaceRoot) != "",
+			Docker: diagnosticsDockerRunnerView{
+				Enabled:               cfg.ControlPlane.Docker.Enabled,
+				WorkerIDConfigured:    strings.TrimSpace(cfg.ControlPlane.Docker.WorkerID) != "",
+				HostCount:             len(cfg.ControlPlane.Docker.HostIDs),
+				OperationKinds:        append([]string(nil), cfg.ControlPlane.Docker.OperationKinds...),
+				ComposeRootConfigured: strings.TrimSpace(cfg.ControlPlane.Docker.ComposeRoot) != "",
+				PollInterval:          durationString(cfg.ControlPlane.Docker.PollInterval),
+			},
+			AgentRuntime: diagnosticsAgentRuntimeView{
+				Enabled:                 cfg.ControlPlane.AgentRuntime.Enabled,
+				WorkerIDConfigured:      strings.TrimSpace(cfg.ControlPlane.AgentRuntime.WorkerID) != "",
+				ProviderIDs:             append([]string(nil), cfg.ControlPlane.AgentRuntime.ProviderIDs...),
+				ProviderKinds:           append([]string(nil), cfg.ControlPlane.AgentRuntime.ProviderKinds...),
+				ProviderCount:           len(cfg.ControlPlane.AgentRuntime.Providers),
+				HermesCommandConfigured: strings.TrimSpace(cfg.ControlPlane.AgentRuntime.HermesCommand) != "",
+				WorkspaceRootConfigured: strings.TrimSpace(cfg.ControlPlane.AgentRuntime.WorkspaceRoot) != "",
+				PollInterval:            durationString(cfg.ControlPlane.AgentRuntime.PollInterval),
+			},
+		},
+		Runtime: diagnosticsRuntimeView{
+			ControllerAvailable: runtime != nil,
+		},
+	}
+	view.ControlPlane.CallbackRetry.MaxAttempts = cfg.ControlPlane.CallbackRetry.MaxAttempts
+	view.ControlPlane.CallbackRetry.Backoff = durationString(cfg.ControlPlane.CallbackRetry.Backoff)
+	if runtime != nil {
+		view.Runtime.ActiveTasks = len(runtime.ListActiveTasks())
+	}
+	if metrics, ok := runtime.(RuntimeMetricsController); ok {
+		snapshot := metrics.MetricsSnapshot()
+		view.Runtime.ActiveTasks = snapshot.ActiveTasks
+		view.Runtime.MetricsAvailable = true
+		view.Metrics = &snapshot
+	}
+	return view
+}
+
+var managedAgentDiagnosticCapabilityKeys = []string{
+	"cluster.inventory",
+	"workload.read",
+	"network.inventory",
+	"port.forward",
+	"pod.logs",
+	"pod.exec",
+	"helm.releases",
+}
+
+func buildDiagnosticsCapabilitiesView(cfg cfgpkg.Config, kubernetesClientAvailable bool) diagnosticsCapabilitiesView {
+	items := make([]diagnosticsCapabilityItem, 0, len(managedAgentDiagnosticCapabilityKeys))
+	if !cfg.Kubernetes.Enabled {
+		for _, key := range managedAgentDiagnosticCapabilityKeys {
+			items = append(items, diagnosticsCapabilityItem{Key: key, Status: "unsupported", Reason: "kubernetes runtime is disabled"})
+		}
+		return diagnosticsCapabilitiesView{
+			Mode:         "agent",
+			Status:       "degraded",
+			RequiredKeys: append([]string(nil), managedAgentDiagnosticCapabilityKeys...),
+			DegradedKeys: append([]string(nil), managedAgentDiagnosticCapabilityKeys...),
+			Items:        items,
+			Message:      "Managed-agent Kubernetes capabilities are unavailable because Kubernetes runtime is disabled.",
+		}
+	}
+	if !kubernetesClientAvailable {
+		for _, key := range managedAgentDiagnosticCapabilityKeys {
+			items = append(items, diagnosticsCapabilityItem{Key: key, Status: "unsupported", Reason: "kubernetes client is not available"})
+		}
+		return diagnosticsCapabilitiesView{
+			Mode:         "agent",
+			Status:       "degraded",
+			RequiredKeys: append([]string(nil), managedAgentDiagnosticCapabilityKeys...),
+			DegradedKeys: append([]string(nil), managedAgentDiagnosticCapabilityKeys...),
+			Items:        items,
+			Message:      "Managed-agent Kubernetes capabilities are unavailable because Kubernetes client initialization failed or was not configured.",
+		}
+	}
+
+	items = append(items,
+		diagnosticsCapabilityItem{Key: "cluster.inventory", Status: "available"},
+		diagnosticsCapabilityItem{Key: "workload.read", Status: "available"},
+		diagnosticsCapabilityItem{Key: "network.inventory", Status: "available"},
+		guardedCapabilityItem("port.forward",
+			cfg.Security.AllowedActions,
+			"port-forward actions are not fully allowlisted",
+			actionPlatformPortForwardsCreate,
+			actionPlatformPortForwardsTunnel,
+			actionPlatformPortForwardsDelete,
+		),
+		diagnosticsCapabilityItem{Key: "pod.logs", Status: "available"},
+		guardedCapabilityItem("pod.exec",
+			cfg.Security.AllowedActions,
+			"pod exec action is not allowlisted",
+			actionPlatformPodsExec,
+		),
+		guardedCapabilityItem("helm.releases",
+			cfg.Security.AllowedActions,
+			"Helm release mutation actions are not fully allowlisted",
+			actionPlatformHelmReleaseInstall,
+			actionPlatformHelmReleaseValuesUpdate,
+			actionPlatformHelmReleaseDelete,
+		),
+	)
+
+	view := diagnosticsCapabilitiesView{
+		Mode:         "agent",
+		Status:       "available",
+		RequiredKeys: append([]string(nil), managedAgentDiagnosticCapabilityKeys...),
+		Items:        items,
+		Message:      "All managed-agent required capabilities are available.",
+	}
+	for _, item := range items {
+		if item.Status == "available" {
+			view.AvailableKeys = append(view.AvailableKeys, item.Key)
+			continue
+		}
+		view.DegradedKeys = append(view.DegradedKeys, item.Key)
+	}
+	if len(view.DegradedKeys) > 0 {
+		view.Status = "degraded"
+		view.Message = "One or more managed-agent capabilities are partial or unsupported by current Agent configuration."
+	}
+	return view
+}
+
+func guardedCapabilityItem(key string, allowedActions []string, reason string, actions ...string) diagnosticsCapabilityItem {
+	for _, action := range actions {
+		if !securityActionAllowed(allowedActions, action) {
+			return diagnosticsCapabilityItem{Key: key, Status: "partial", Reason: reason}
+		}
+	}
+	return diagnosticsCapabilityItem{Key: key, Status: "available"}
+}
+
+func securityActionAllowed(allowedActions []string, action string) bool {
+	normalized := normalizeAction(action)
+	if normalized == "" {
+		return false
+	}
+	for _, allowed := range allowedActions {
+		switch normalizeAction(allowed) {
+		case "*", normalized:
+			return true
+		}
+	}
+	return false
+}
+
+func durationString(value time.Duration) string {
+	if value <= 0 {
+		return ""
+	}
+	return value.String()
 }
 
 func (s *Server) Run() error {

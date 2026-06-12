@@ -716,6 +716,204 @@ func (c *Client) GetCronJobYAML(ctx context.Context, namespace, name string) (do
 	return domainresource.ResourceYAMLView{Kind: "CronJob", Name: name, Namespace: namespace, Content: string(content)}, nil
 }
 
+func (c *Client) GetResourceYAML(ctx context.Context, namespace, kind, name string) (domainresource.ResourceYAMLView, error) {
+	gvr, namespaceScoped, canonicalKind, err := resourceGVRForKind(kind)
+	if err != nil {
+		return domainresource.ResourceYAMLView{}, err
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resource, effectiveNamespace, err := c.dynamicResource(gvr, namespaceScoped, namespace, nil)
+	if err != nil {
+		return domainresource.ResourceYAMLView{}, err
+	}
+	item, err := resource.Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.ResourceYAMLView{}, err
+	}
+	unstructured.RemoveNestedField(item.Object, "metadata", "managedFields")
+	content, err := yaml.Marshal(item.Object)
+	if err != nil {
+		return domainresource.ResourceYAMLView{}, err
+	}
+	return domainresource.ResourceYAMLView{
+		Kind:      canonicalKind,
+		Name:      item.GetName(),
+		Namespace: effectiveNamespace,
+		Content:   string(content),
+	}, nil
+}
+
+func (c *Client) ApplyResourceYAML(ctx context.Context, namespace, kind, name, content string) (domainresource.ResourceYAMLView, error) {
+	if strings.TrimSpace(content) == "" {
+		return domainresource.ResourceYAMLView{}, fmt.Errorf("yaml content is required")
+	}
+	gvr, namespaceScoped, canonicalKind, err := resourceGVRForKind(kind)
+	if err != nil {
+		return domainresource.ResourceYAMLView{}, err
+	}
+	var object map[string]any
+	if err := yaml.Unmarshal([]byte(content), &object); err != nil {
+		return domainresource.ResourceYAMLView{}, fmt.Errorf("invalid yaml: %w", err)
+	}
+	item := &unstructured.Unstructured{Object: object}
+	item.SetKind(canonicalKind)
+	if item.GetName() == "" {
+		item.SetName(name)
+	}
+	if item.GetName() != name {
+		return domainresource.ResourceYAMLView{}, fmt.Errorf("yaml metadata.name does not match target resource")
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resource, effectiveNamespace, err := c.dynamicResource(gvr, namespaceScoped, namespace, item)
+	if err != nil {
+		return domainresource.ResourceYAMLView{}, err
+	}
+	if item.GetResourceVersion() == "" {
+		current, err := resource.Get(queryCtx, name, metav1.GetOptions{})
+		if err != nil {
+			return domainresource.ResourceYAMLView{}, err
+		}
+		item.SetResourceVersion(current.GetResourceVersion())
+	}
+	updated, err := resource.Update(queryCtx, item, metav1.UpdateOptions{})
+	if err != nil {
+		return domainresource.ResourceYAMLView{}, err
+	}
+	rendered, err := yaml.Marshal(updated.Object)
+	if err != nil {
+		return domainresource.ResourceYAMLView{}, err
+	}
+	return domainresource.ResourceYAMLView{
+		Kind:      canonicalKind,
+		Name:      updated.GetName(),
+		Namespace: effectiveNamespace,
+		Content:   string(rendered),
+	}, nil
+}
+
+func (c *Client) DeleteResource(ctx context.Context, namespace, kind, name string) error {
+	gvr, namespaceScoped, _, err := resourceGVRForKind(kind)
+	if err != nil {
+		return err
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resource, _, err := c.dynamicResource(gvr, namespaceScoped, namespace, nil)
+	if err != nil {
+		return err
+	}
+	return resource.Delete(queryCtx, name, metav1.DeleteOptions{})
+}
+
+func (c *Client) dynamicResource(gvr schema.GroupVersionResource, namespaceScoped bool, namespace string, item *unstructured.Unstructured) (dynamic.ResourceInterface, string, error) {
+	if !namespaceScoped {
+		if item != nil && strings.TrimSpace(item.GetNamespace()) != "" {
+			return nil, "", fmt.Errorf("yaml metadata.namespace must be empty for cluster-scoped resource")
+		}
+		if item != nil {
+			item.SetNamespace("")
+		}
+		return c.dynamic.Resource(gvr), "", nil
+	}
+	effectiveNamespace := strings.TrimSpace(namespace)
+	if item != nil {
+		if strings.TrimSpace(item.GetNamespace()) == "" {
+			item.SetNamespace(effectiveNamespace)
+		}
+		if effectiveNamespace == "" {
+			effectiveNamespace = item.GetNamespace()
+		}
+		if item.GetNamespace() != effectiveNamespace {
+			return nil, "", fmt.Errorf("yaml metadata.namespace does not match target resource")
+		}
+	}
+	if effectiveNamespace == "" {
+		return nil, "", fmt.Errorf("namespace is required for namespaced resource")
+	}
+	return c.dynamic.Resource(gvr).Namespace(effectiveNamespace), effectiveNamespace, nil
+}
+
+func resourceGVRForKind(kind string) (schema.GroupVersionResource, bool, string, error) {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "pod":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}, true, "Pod", nil
+	case "node":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}, false, "Node", nil
+	case "deployment":
+		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, true, "Deployment", nil
+	case "statefulset":
+		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}, true, "StatefulSet", nil
+	case "daemonset":
+		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}, true, "DaemonSet", nil
+	case "job":
+		return schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}, true, "Job", nil
+	case "cronjob":
+		return schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"}, true, "CronJob", nil
+	case "configmap":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}, true, "ConfigMap", nil
+	case "secret":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}, true, "Secret", nil
+	case "serviceaccount":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "serviceaccounts"}, true, "ServiceAccount", nil
+	case "replicationcontroller":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "replicationcontrollers"}, true, "ReplicationController", nil
+	case "service":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "services"}, true, "Service", nil
+	case "persistentvolumeclaim":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumeclaims"}, true, "PersistentVolumeClaim", nil
+	case "persistentvolume":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumes"}, false, "PersistentVolume", nil
+	case "role":
+		return schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}, true, "Role", nil
+	case "rolebinding":
+		return schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"}, true, "RoleBinding", nil
+	case "resourcequota":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "resourcequotas"}, true, "ResourceQuota", nil
+	case "limitrange":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "limitranges"}, true, "LimitRange", nil
+	case "lease":
+		return schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}, true, "Lease", nil
+	case "ingress":
+		return schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"}, true, "Ingress", nil
+	case "endpointslice":
+		return schema.GroupVersionResource{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}, true, "EndpointSlice", nil
+	case "networkpolicy":
+		return schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}, true, "NetworkPolicy", nil
+	case "ingressclass":
+		return schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingressclasses"}, false, "IngressClass", nil
+	case "gatewayclass":
+		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gatewayclasses"}, false, "GatewayClass", nil
+	case "gateway":
+		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gateways"}, true, "Gateway", nil
+	case "httproute":
+		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}, true, "HTTPRoute", nil
+	case "backendtlspolicy":
+		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "backendtlspolicies"}, true, "BackendTLSPolicy", nil
+	case "grpcroute":
+		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "grpcroutes"}, true, "GRPCRoute", nil
+	case "referencegrant":
+		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "referencegrants"}, true, "ReferenceGrant", nil
+	case "priorityclass":
+		return schema.GroupVersionResource{Group: "scheduling.k8s.io", Version: "v1", Resource: "priorityclasses"}, false, "PriorityClass", nil
+	case "runtimeclass":
+		return schema.GroupVersionResource{Group: "node.k8s.io", Version: "v1", Resource: "runtimeclasses"}, false, "RuntimeClass", nil
+	case "clusterrole":
+		return schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"}, false, "ClusterRole", nil
+	case "clusterrolebinding":
+		return schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"}, false, "ClusterRoleBinding", nil
+	case "mutatingwebhookconfiguration":
+		return schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingwebhookconfigurations"}, false, "MutatingWebhookConfiguration", nil
+	case "validatingwebhookconfiguration":
+		return schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingwebhookconfigurations"}, false, "ValidatingWebhookConfiguration", nil
+	case "storageclass":
+		return schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "storageclasses"}, false, "StorageClass", nil
+	default:
+		return schema.GroupVersionResource{}, false, "", fmt.Errorf("yaml apply does not support kind %s", kind)
+	}
+}
+
 func (c *Client) ListCRDs(ctx context.Context) ([]domainresource.CRDView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -1158,6 +1356,17 @@ func buildRESTConfig(cfg cfgpkg.KubernetesConfig) (*rest.Config, error) {
 			return nil, err
 		}
 		restConfig, err := clientConfig.ClientConfig()
+		if err != nil {
+			return nil, err
+		}
+		restConfig.QPS = 20
+		restConfig.Burst = 40
+		restConfig.Timeout = 5 * time.Second
+		return restConfig, nil
+	}
+
+	if strings.TrimSpace(cfg.Kubeconfig) == "" {
+		restConfig, err := rest.InClusterConfig()
 		if err != nil {
 			return nil, err
 		}
