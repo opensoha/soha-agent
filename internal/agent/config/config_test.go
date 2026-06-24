@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 const (
 	productionAgentToken        = "agent-token-32-characters-minimum"
@@ -173,11 +177,28 @@ func TestValidateAllowsProductionWithExplicitTokensAndDockerAllowlist(t *testing
 			BearerToken: productionControlPlaneToken,
 			Docker: DockerRunnerConfig{
 				Enabled:        true,
-				OperationKinds: []string{"project_deploy"},
+				OperationKinds: []string{"host_provision", "project_deploy"},
 			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestLoadUsesExplicitConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.config.yaml")
+	if err := os.WriteFile(path, []byte("app:\n  name: custom-agent\n"), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	t.Setenv("SOHA_AGENT_CONFIG_FILE", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.App.Name != "custom-agent" {
+		t.Fatalf("App.Name = %q, want custom-agent", cfg.App.Name)
 	}
 }

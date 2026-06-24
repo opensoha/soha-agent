@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -598,6 +599,20 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 		logs = append(logs, commandLogs[0])
 
 		commandCtx, cancelCommand := context.WithCancel(taskCtx)
+		// Execution tasks are claimed from the authenticated control plane. Do not
+		// feed user-provided fragments into this shell command path without first
+		// converting them to argv-style commands or a strict template allowlist.
+		r.logger.Info("execution task command started",
+			zap.String("task_id", task.ID),
+			zap.String("task_kind", task.TaskKind),
+			zap.String("provider_kind", task.ProviderKind),
+			zap.String("agent_id", agentID),
+			zap.String("command_source", "control_plane_claim"),
+			zap.String("command_fingerprint", commandFingerprint(command)),
+			zap.Int("command_index", index+1),
+			zap.Int("command_count", commandCount),
+			zap.String("workspace_path", workspacePath),
+		)
 		cmd := exec.CommandContext(commandCtx, "/bin/sh", "-lc", command)
 		if commandDir != "" {
 			cmd.Dir = commandDir
@@ -768,6 +783,8 @@ func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOpe
 	var err error
 	var commandLogs []string
 	switch operation.OperationKind {
+	case "host_provision":
+		commandLogs, err = r.validateDockerHostProvision(taskCtx)
 	case "container_start", "project_deploy":
 		commandLogs, err = r.executeComposeAction(taskCtx, operation)
 	case "service_action":
@@ -808,6 +825,22 @@ func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOpe
 	}
 	r.dockerCallback(ctx, operation, "completed", payload, logs)
 	r.metrics.markOutcome(metricScopeDocker, "completed")
+}
+
+func (r *Runner) validateDockerHostProvision(ctx context.Context) ([]string, error) {
+	logs := []string{"validating docker runtime before marking host provision ready"}
+	dockerInfo, err := runCommand(ctx, "", "docker", "info", "--format", "{{.ServerVersion}} {{.Architecture}}")
+	logs = append(logs, dockerInfo...)
+	if err != nil {
+		return logs, fmt.Errorf("docker runtime unavailable: %w", err)
+	}
+	composeInfo, err := runCommand(ctx, "", "docker", "compose", "version")
+	logs = append(logs, composeInfo...)
+	if err != nil {
+		return logs, fmt.Errorf("docker compose unavailable: %w", err)
+	}
+	logs = append(logs, "docker runtime validated")
+	return logs, nil
 }
 
 func (r *Runner) streamDockerHeartbeats(ctx context.Context, cancel context.CancelFunc, done <-chan struct{}, stopReason chan<- string, operation DockerOperation) {
@@ -1765,6 +1798,15 @@ func extractCommands(payload map[string]any) []string {
 	default:
 		return nil
 	}
+}
+
+func commandFingerprint(command string) string {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return fmt.Sprintf("sha256:%x", sum[:8])
 }
 
 func resolveImageFromCommands(payload map[string]any, commands []string) string {

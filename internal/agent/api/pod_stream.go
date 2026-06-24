@@ -28,7 +28,7 @@ func registerPodStreamRoutes(platform *gin.RouterGroup, client *k8sagent.Client)
 			writeError(c, err)
 			return
 		}
-		_, _ = fmt.Fprintf(writer, "\n[agent] %v\n", err)
+		_, _ = fmt.Fprintln(writer, "\n[agent] pod log stream ended with an error")
 	})
 }
 

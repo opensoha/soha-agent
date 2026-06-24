@@ -136,6 +136,9 @@ data:
         - platform.deployments.scale
         - platform.deployments.image
         - platform.deployments.rollback
+        - platform.statefulsets.restart
+        - platform.statefulsets.scale
+        - platform.daemonsets.restart
 
     audit:
       file_path: /var/log/soha-agent/actions.jsonl

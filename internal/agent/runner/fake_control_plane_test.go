@@ -181,6 +181,18 @@ func TestRunnerExecutionSlotsRespectMaxConcurrency(t *testing.T) {
 	runner.releaseExecutionSlot()
 }
 
+func TestCommandFingerprintIsStableAndDoesNotExposeCommand(t *testing.T) {
+	command := "echo token=secret"
+	first := commandFingerprint(command)
+	second := commandFingerprint("  " + command + "  ")
+	if first == "" || first != second {
+		t.Fatalf("command fingerprint is not stable: %q %q", first, second)
+	}
+	if strings.Contains(first, command) || strings.Contains(first, "secret") {
+		t.Fatalf("command fingerprint exposed command content: %q", first)
+	}
+}
+
 func containsStatus(statuses []string, status string) bool {
 	for _, item := range statuses {
 		if strings.TrimSpace(item) == status {

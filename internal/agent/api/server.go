@@ -43,6 +43,22 @@ type scaleDeploymentRequest struct {
 	Replicas  int32  `json:"replicas"`
 }
 
+type restartStatefulSetRequest struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+type scaleStatefulSetRequest struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Replicas  int32  `json:"replicas"`
+}
+
+type restartDaemonSetRequest struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
 type updateDeploymentImageRequest struct {
 	Namespace     string `json:"namespace"`
 	Name          string `json:"name"`
@@ -841,6 +857,46 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 				}
 				apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
 			})
+			platform.POST("/actions/statefulsets/restart", actions.Require(actionPlatformStatefulSetRestart), func(c *gin.Context) {
+				var req restartStatefulSetRequest
+				if err := c.ShouldBindJSON(&req); err != nil || req.Namespace == "" || req.Name == "" {
+					apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "namespace and name are required")
+					return
+				}
+				if err := client.RestartStatefulSet(c.Request.Context(), req.Namespace, req.Name); err != nil {
+					writeError(c, err)
+					return
+				}
+				apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
+			})
+			platform.POST("/actions/statefulsets/scale", actions.Require(actionPlatformStatefulSetScale), func(c *gin.Context) {
+				var req scaleStatefulSetRequest
+				if err := c.ShouldBindJSON(&req); err != nil || req.Namespace == "" || req.Name == "" {
+					apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "namespace, name, and replicas are required")
+					return
+				}
+				if req.Replicas < 0 {
+					apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "replicas must be greater than or equal to zero")
+					return
+				}
+				if err := client.ScaleStatefulSet(c.Request.Context(), req.Namespace, req.Name, req.Replicas); err != nil {
+					writeError(c, err)
+					return
+				}
+				apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
+			})
+			platform.POST("/actions/daemonsets/restart", actions.Require(actionPlatformDaemonSetRestart), func(c *gin.Context) {
+				var req restartDaemonSetRequest
+				if err := c.ShouldBindJSON(&req); err != nil || req.Namespace == "" || req.Name == "" {
+					apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "namespace and name are required")
+					return
+				}
+				if err := client.RestartDaemonSet(c.Request.Context(), req.Namespace, req.Name); err != nil {
+					writeError(c, err)
+					return
+				}
+				apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
+			})
 			platform.POST("/actions/deployments/image", actions.Require(actionPlatformDeploymentImage), func(c *gin.Context) {
 				var req updateDeploymentImageRequest
 				if err := c.ShouldBindJSON(&req); err != nil || req.Namespace == "" || req.Name == "" || req.Image == "" {
@@ -1006,6 +1062,7 @@ var managedAgentDiagnosticCapabilityKeys = []string{
 	"port.forward",
 	"pod.logs",
 	"pod.exec",
+	"workload.mutations",
 	"helm.releases",
 }
 
@@ -1054,6 +1111,16 @@ func buildDiagnosticsCapabilitiesView(cfg cfgpkg.Config, kubernetesClientAvailab
 			cfg.Security.AllowedActions,
 			"pod exec action is not allowlisted",
 			actionPlatformPodsExec,
+		),
+		guardedCapabilityItem("workload.mutations",
+			cfg.Security.AllowedActions,
+			"workload mutation actions are not fully allowlisted",
+			actionPlatformDeploymentRestart,
+			actionPlatformDeploymentScale,
+			actionPlatformDeploymentRollback,
+			actionPlatformStatefulSetRestart,
+			actionPlatformStatefulSetScale,
+			actionPlatformDaemonSetRestart,
 		),
 		guardedCapabilityItem("helm.releases",
 			cfg.Security.AllowedActions,
@@ -1195,8 +1262,8 @@ func requestHasAnyBearerToken(c *gin.Context, allowed []string) bool {
 	return false
 }
 
-func writeError(c *gin.Context, err error) {
-	apiresponse.Error(c, http.StatusBadGateway, "cluster_unavailable", fmt.Sprintf("request failed: %v", err))
+func writeError(c *gin.Context, _ error) {
+	apiresponse.Error(c, http.StatusBadGateway, "cluster_unavailable", "cluster request failed")
 }
 
 func parseLimit(value string, fallback int) int {

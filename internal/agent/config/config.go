@@ -113,27 +113,11 @@ type KubernetesConfig struct {
 }
 
 func Load() (Config, error) {
-	v := viper.New()
-	v.SetConfigType("yaml")
-	v.SetEnvPrefix("SOHA_AGENT")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v := newConfigViper("SOHA_AGENT", "SOHA_AGENT_CONFIG_FILE", "agent.config", "configs", ".")
 	setDefaults(v)
-
-	configFile := os.Getenv("SOHA_AGENT_CONFIG_FILE")
-	if configFile != "" {
-		v.SetConfigFile(configFile)
-	} else {
-		v.SetConfigName("agent.config")
-		v.AddConfigPath("configs")
-		v.AddConfigPath(".")
+	if err := readConfig(v); err != nil {
+		return Config{}, err
 	}
-
-	if err := v.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return Config{}, fmt.Errorf("read config file: %w", err)
-		}
-	}
-	v.AutomaticEnv()
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
@@ -147,6 +131,38 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func newConfigViper(envPrefix, configFileEnv, configName string, configPaths ...string) *viper.Viper {
+	v := viper.New()
+	v.SetConfigType("yaml")
+	v.SetEnvPrefix(envPrefix)
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	configFile := strings.TrimSpace(os.Getenv(configFileEnv))
+	if configFile != "" {
+		v.SetConfigFile(configFile)
+		return v
+	}
+
+	v.SetConfigName(configName)
+	for _, path := range configPaths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		v.AddConfigPath(path)
+	}
+	return v
+}
+
+func readConfig(v *viper.Viper) error {
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return fmt.Errorf("read config file: %w", err)
+		}
+	}
+	v.AutomaticEnv()
+	return nil
 }
 
 func Validate(cfg Config) error {
@@ -290,6 +306,9 @@ func knownAction(action string) bool {
 		"platform.deployments.scale",
 		"platform.deployments.image",
 		"platform.deployments.rollback",
+		"platform.statefulsets.restart",
+		"platform.statefulsets.scale",
+		"platform.daemonsets.restart",
 		"platform.resources.apply",
 		"platform.resources.delete",
 		"platform.custom_resources.list",
@@ -312,7 +331,7 @@ func knownAction(action string) bool {
 
 func knownDockerOperationKind(kind string) bool {
 	switch normalizeActionName(kind) {
-	case "container_start", "project_deploy", "service_action", "port_reserve", "host_sync":
+	case "host_provision", "container_start", "project_deploy", "service_action", "port_reserve", "host_sync":
 		return true
 	default:
 		return false

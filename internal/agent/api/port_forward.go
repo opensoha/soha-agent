@@ -160,7 +160,7 @@ func registerPortForwardRoutes(platform *gin.RouterGroup, registry *portForwardR
 				apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", err.Error())
 				return
 			}
-			apiresponse.Error(c, http.StatusServiceUnavailable, "cluster_unready", err.Error())
+			apiresponse.Error(c, http.StatusServiceUnavailable, "cluster_unready", "cluster is not ready for port-forward")
 			return
 		}
 		apiresponse.Item(c, http.StatusCreated, item)
@@ -178,7 +178,7 @@ func registerPortForwardRoutes(platform *gin.RouterGroup, registry *portForwardR
 		defer conn.Close()
 		targetConn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(session.localPort)), 5*time.Second)
 		if err != nil {
-			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
+			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "port-forward tunnel is unavailable"))
 			return
 		}
 		defer targetConn.Close()

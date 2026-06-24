@@ -39,6 +39,14 @@ const (
 	dockerRuntimeMaxReadLimit        = 1024 * 1024
 )
 
+const (
+	dockerRuntimeRequestFailedMessage       = "docker runtime request failed"
+	dockerRuntimeStreamFailedMessage        = "docker runtime stream ended with an error"
+	dockerRuntimeTerminalUnavailableMessage = "docker runtime terminal is unavailable"
+	dockerRuntimeTerminalFailedMessage      = "docker runtime terminal failed to start"
+	dockerRuntimeTerminalExitedMessage      = "docker runtime terminal exited with an error"
+)
+
 var (
 	dockerRuntimeServiceNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
@@ -146,7 +154,7 @@ func handleDockerRuntimeLogStream(c *gin.Context) {
 	tailLines := normalizeDockerRuntimeTailLines(req.TailLines)
 	args := append(dockerRuntimeComposeArgs(workspace, "logs", "-f", "--tail", strconv.Itoa(tailLines)), req.ServiceName)
 	if err := streamDockerRuntimeCommand(c.Request.Context(), workspace.Dir, writer, writer, args...); err != nil && !errors.Is(err, context.Canceled) {
-		_, _ = fmt.Fprintf(writer, "\n[docker-runtime] %v\n", err)
+		_, _ = fmt.Fprintf(writer, "\n[docker-runtime] %s\n", dockerRuntimeStreamFailedMessage)
 	}
 }
 
@@ -173,12 +181,12 @@ func handleDockerRuntimeTerminal(upgrader websocket.Upgrader) gin.HandlerFunc {
 			return
 		}
 		if err := validateDockerRuntimeRequest(req); err != nil {
-			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: "invalid docker runtime request"})
 			return
 		}
 		workspace, cleanup, err := prepareDockerRuntimeWorkspace(req)
 		if err != nil {
-			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: dockerRuntimeTerminalUnavailableMessage})
 			return
 		}
 		defer cleanup()
@@ -191,21 +199,21 @@ func handleDockerRuntimeTerminal(upgrader websocket.Upgrader) gin.HandlerFunc {
 		cmd.Dir = workspace.Dir
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
-			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: dockerRuntimeTerminalFailedMessage})
 			return
 		}
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: dockerRuntimeTerminalFailedMessage})
 			return
 		}
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
-			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: dockerRuntimeTerminalFailedMessage})
 			return
 		}
 		if err := cmd.Start(); err != nil {
-			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: err.Error()})
+			_ = conn.WriteJSON(dockerRuntimeMessage{Type: "error", Message: dockerRuntimeTerminalFailedMessage})
 			return
 		}
 
@@ -252,7 +260,7 @@ func handleDockerRuntimeTerminal(upgrader websocket.Upgrader) gin.HandlerFunc {
 			cancel()
 		}
 		if waitErr != nil && ctx.Err() == nil {
-			_ = write(dockerRuntimeMessage{Type: "error", Message: waitErr.Error()})
+			_ = write(dockerRuntimeMessage{Type: "error", Message: dockerRuntimeTerminalExitedMessage})
 			return
 		}
 		_ = write(dockerRuntimeMessage{Type: "exit", Message: "terminal session closed"})
@@ -346,7 +354,7 @@ func bindDockerRuntimeRequest(c *gin.Context, req *dockerRuntimeRequest) bool {
 		return false
 	}
 	if err := validateDockerRuntimeRequest(*req); err != nil {
-		apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", err.Error())
+		apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "invalid docker runtime request")
 		return false
 	}
 	return true
@@ -448,8 +456,8 @@ func pipeDockerRuntimeOutput(reader io.Reader, write func(string) bool) {
 	}
 }
 
-func dockerRuntimeWriteError(c *gin.Context, err error) {
-	apiresponse.Error(c, http.StatusBadGateway, "docker_runtime_failed", fmt.Sprintf("docker runtime request failed: %v", err))
+func dockerRuntimeWriteError(c *gin.Context, _ error) {
+	apiresponse.Error(c, http.StatusBadGateway, "docker_runtime_failed", dockerRuntimeRequestFailedMessage)
 }
 
 func dockerRuntimeProjectVolumes(req dockerRuntimeRequest) []domaindocker.ProjectVolume {

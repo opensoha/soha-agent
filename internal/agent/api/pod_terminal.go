@@ -85,7 +85,7 @@ func registerPodTerminalRoutes(platform *gin.RouterGroup, client *k8sagent.Clien
 		cancel()
 		<-readDone
 		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
-			_ = writePodTerminalMessage(conn, &writeMu, podTerminalMessage{Type: "error", Message: streamErr.Error()})
+			_ = writePodTerminalMessage(conn, &writeMu, podTerminalMessage{Type: "error", Message: "terminal session ended with an error"})
 			return
 		}
 		_ = writePodTerminalMessage(conn, &writeMu, podTerminalMessage{Type: "exit", Message: "terminal session closed"})

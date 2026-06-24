@@ -27,6 +27,9 @@ security:
     - platform.deployments.scale
     - platform.deployments.image
     - platform.deployments.rollback
+    - platform.statefulsets.restart
+    - platform.statefulsets.scale
+    - platform.daemonsets.restart
     - platform.resources.apply
     - platform.resources.delete
     - platform.custom_resources.list
@@ -65,6 +68,7 @@ control_plane:
     worker_id: local-docker-runner
     host_ids: []
     operation_kinds:
+      - host_provision
       - container_start
       - project_deploy
       - service_action

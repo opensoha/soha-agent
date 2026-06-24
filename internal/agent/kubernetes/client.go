@@ -38,8 +38,8 @@ import (
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
 	domaincluster "github.com/opensoha/soha-agent/internal/domain/cluster"
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
-	helmrelease "github.com/opensoha/soha-agent/internal/platform/helmrelease"
-	"github.com/opensoha/soha-agent/internal/platform/streamlimit"
+	helmrelease "github.com/opensoha/soha-contracts/helmrelease"
+	"github.com/opensoha/soha-contracts/streamlimit"
 )
 
 type Client struct {
@@ -847,6 +847,8 @@ func resourceGVRForKind(kind string) (schema.GroupVersionResource, bool, string,
 		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}, true, "StatefulSet", nil
 	case "daemonset":
 		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}, true, "DaemonSet", nil
+	case "replicaset":
+		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}, true, "ReplicaSet", nil
 	case "job":
 		return schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}, true, "Job", nil
 	case "cronjob":
@@ -1319,6 +1321,48 @@ func (c *Client) ScaleDeployment(ctx context.Context, namespace, name string, re
 	}
 	deployment.Spec.Replicas = &replicas
 	_, err = c.typed.AppsV1().Deployments(namespace).Update(queryCtx, deployment, metav1.UpdateOptions{})
+	return err
+}
+
+func (c *Client) RestartStatefulSet(ctx context.Context, namespace, name string) error {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	statefulSet, err := c.typed.AppsV1().StatefulSets(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if statefulSet.Spec.Template.Annotations == nil {
+		statefulSet.Spec.Template.Annotations = map[string]string{}
+	}
+	statefulSet.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().UTC().Format(time.RFC3339)
+	_, err = c.typed.AppsV1().StatefulSets(namespace).Update(queryCtx, statefulSet, metav1.UpdateOptions{})
+	return err
+}
+
+func (c *Client) ScaleStatefulSet(ctx context.Context, namespace, name string, replicas int32) error {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	statefulSet, err := c.typed.AppsV1().StatefulSets(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	statefulSet.Spec.Replicas = &replicas
+	_, err = c.typed.AppsV1().StatefulSets(namespace).Update(queryCtx, statefulSet, metav1.UpdateOptions{})
+	return err
+}
+
+func (c *Client) RestartDaemonSet(ctx context.Context, namespace, name string) error {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	daemonSet, err := c.typed.AppsV1().DaemonSets(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if daemonSet.Spec.Template.Annotations == nil {
+		daemonSet.Spec.Template.Annotations = map[string]string{}
+	}
+	daemonSet.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().UTC().Format(time.RFC3339)
+	_, err = c.typed.AppsV1().DaemonSets(namespace).Update(queryCtx, daemonSet, metav1.UpdateOptions{})
 	return err
 }
 

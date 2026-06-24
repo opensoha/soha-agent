@@ -94,3 +94,38 @@ func TestDeleteResourceDeletesDynamicResource(t *testing.T) {
 		t.Fatal("deleted resource was still found")
 	}
 }
+
+func TestResourceGVRForKindSupportsWorkloadControllers(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		kind          string
+		resource      string
+		canonicalKind string
+	}{
+		{kind: "ReplicaSet", resource: "replicasets", canonicalKind: "ReplicaSet"},
+		{kind: "StatefulSet", resource: "statefulsets", canonicalKind: "StatefulSet"},
+		{kind: "DaemonSet", resource: "daemonsets", canonicalKind: "DaemonSet"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.kind, func(t *testing.T) {
+			t.Parallel()
+
+			gvr, namespaceScoped, canonicalKind, err := resourceGVRForKind(tc.kind)
+			if err != nil {
+				t.Fatalf("resourceGVRForKind(%q) error = %v", tc.kind, err)
+			}
+			if gvr.Resource != tc.resource {
+				t.Fatalf("resourceGVRForKind(%q) resource = %q, want %q", tc.kind, gvr.Resource, tc.resource)
+			}
+			if !namespaceScoped {
+				t.Fatalf("resourceGVRForKind(%q) namespaceScoped = false, want true", tc.kind)
+			}
+			if canonicalKind != tc.canonicalKind {
+				t.Fatalf("resourceGVRForKind(%q) canonicalKind = %q, want %q", tc.kind, canonicalKind, tc.canonicalKind)
+			}
+		})
+	}
+}

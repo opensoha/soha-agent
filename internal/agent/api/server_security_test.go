@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -25,6 +26,44 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+func TestWriteErrorDoesNotExposeInternalError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	writeError(ctx, errors.New("dial tcp 10.0.0.5:6443: tls handshake failed"))
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadGateway)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "cluster request failed") {
+		t.Fatalf("body missing public error message: %s", body)
+	}
+	if strings.Contains(body, "10.0.0.5") || strings.Contains(body, "tls handshake failed") {
+		t.Fatalf("body leaked internal error: %s", body)
+	}
+}
+
+func TestDockerRuntimeWriteErrorDoesNotExposeInternalError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	dockerRuntimeWriteError(ctx, errors.New("docker compose failed: password=secret"))
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadGateway)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, dockerRuntimeRequestFailedMessage) {
+		t.Fatalf("body missing public error message: %s", body)
+	}
+	if strings.Contains(body, "password=secret") || strings.Contains(body, "docker compose failed") {
+		t.Fatalf("body leaked internal error: %s", body)
+	}
+}
 
 func TestRuntimeCancelDeniedWhenActionNotAllowlisted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -493,10 +532,10 @@ func TestDiagnosticsEndpointReturnsSafeRuntimeSummary(t *testing.T) {
 	if !body.Data.Kubernetes.Enabled || body.Data.Kubernetes.ClientAvailable || !body.Data.Kubernetes.KubeconfigConfigured || !body.Data.Kubernetes.KubeconfigDataLoaded || body.Data.Kubernetes.LabelsCount != 1 {
 		t.Fatalf("unexpected kubernetes diagnostics: %#v", body.Data.Kubernetes)
 	}
-	if body.Data.Capabilities.Mode != "agent" || body.Data.Capabilities.Status != "degraded" || len(body.Data.Capabilities.RequiredKeys) != 7 || len(body.Data.Capabilities.DegradedKeys) != 7 {
+	if body.Data.Capabilities.Mode != "agent" || body.Data.Capabilities.Status != "degraded" || len(body.Data.Capabilities.RequiredKeys) != 8 || len(body.Data.Capabilities.DegradedKeys) != 8 {
 		t.Fatalf("unexpected capability diagnostics: %#v", body.Data.Capabilities)
 	}
-	if len(body.Data.Capabilities.Items) != 7 || body.Data.Capabilities.Items[0].Key != "cluster.inventory" || body.Data.Capabilities.Items[0].Status != "unsupported" || !strings.Contains(body.Data.Capabilities.Items[0].Reason, "kubernetes client") {
+	if len(body.Data.Capabilities.Items) != 8 || body.Data.Capabilities.Items[0].Key != "cluster.inventory" || body.Data.Capabilities.Items[0].Status != "unsupported" || !strings.Contains(body.Data.Capabilities.Items[0].Reason, "kubernetes client") {
 		t.Fatalf("unexpected capability item diagnostics: %#v", body.Data.Capabilities.Items)
 	}
 	if !body.Data.ControlPlane.Enabled || !body.Data.ControlPlane.BaseURLConfigured || body.Data.ControlPlane.MaxConcurrency != 3 {
@@ -518,7 +557,7 @@ func TestBuildDiagnosticsCapabilitiesReflectsManagedAgentAllowlist(t *testing.T)
 		Kubernetes: cfgpkg.KubernetesConfig{Enabled: true},
 		Security:   cfgpkg.SecurityConfig{AllowedActions: []string{"*"}},
 	}, true)
-	if available.Status != "available" || len(available.AvailableKeys) != 7 || len(available.DegradedKeys) != 0 {
+	if available.Status != "available" || len(available.AvailableKeys) != 8 || len(available.DegradedKeys) != 0 {
 		t.Fatalf("expected all capabilities available, got %#v", available)
 	}
 
@@ -534,9 +573,10 @@ func TestBuildDiagnosticsCapabilitiesReflectsManagedAgentAllowlist(t *testing.T)
 		t.Fatalf("expected degraded capability summary, got %#v", partial)
 	}
 	expected := map[string]string{
-		"port.forward":  "partial",
-		"pod.exec":      "available",
-		"helm.releases": "partial",
+		"port.forward":       "partial",
+		"pod.exec":           "available",
+		"workload.mutations": "partial",
+		"helm.releases":      "partial",
 	}
 	for _, item := range partial.Items {
 		if want, ok := expected[item.Key]; ok && item.Status != want {
