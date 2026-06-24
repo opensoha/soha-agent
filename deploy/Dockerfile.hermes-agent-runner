@@ -9,12 +9,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 COPY go.mod go.sum ./soha-agent/
+COPY --from=contracts go.mod go.sum ./soha-contracts/
 RUN for attempt in 1 2 3; do \
-      cd soha-agent && GOWORK=off go mod download && exit 0; \
+      printf 'go 1.25.0\n\nuse (\n\t./soha-agent\n\t./soha-contracts\n)\n\nreplace github.com/opensoha/soha-contracts v0.1.1 => ./soha-contracts\n' > go.work; \
+      cd soha-agent && go mod download && exit 0; \
       echo "go mod download failed on attempt ${attempt}, retrying..." >&2; \
       sleep 2; \
     done; \
     exit 1
+COPY --from=contracts . ./soha-contracts
 COPY . ./soha-agent
 RUN cd soha-agent && GOWORK=off CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Version=${VERSION} -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Commit=${COMMIT} -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Date=${DATE}" -o /out/soha-agent ./cmd/agent
 

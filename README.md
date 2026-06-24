@@ -42,11 +42,14 @@ security:
     - platform.deployments.scale
     - platform.deployments.image
     - platform.deployments.rollback
+    - platform.statefulsets.restart
+    - platform.statefulsets.scale
+    - platform.daemonsets.restart
     - runtime.execution_tasks.cancel
     - docker.runtime.terminal
 ```
 
-Docker runner operation kinds are a separate allowlist under `control_plane.docker.operation_kinds`; keep it to the exact kinds the control plane should claim, for example `project_deploy` or `service_action`.
+Docker runner operation kinds are a separate allowlist under `control_plane.docker.operation_kinds`; keep it to the exact kinds the control plane should claim, for example `host_provision`, `project_deploy`, or `service_action`.
 
 Structured action audit is always written to the configured logger. To persist high-risk action decisions as JSON Lines, set:
 
@@ -74,7 +77,7 @@ Local diagnostics are available from `GET /api/v1/diagnostics`; the response is 
 The Hermes runner image can be built with:
 
 ```sh
-docker build -f deploy/Dockerfile.hermes-agent-runner -t soha-agent:hermes .
+docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile.hermes-agent-runner -t soha-agent:hermes .
 ```
 
 The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/arm64`) and binary archives for Linux, macOS, and Windows. Each archive has a `.sha256` sidecar plus a release-level `SHA256SUMS` manifest.

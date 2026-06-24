@@ -14,11 +14,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: soha-agent
+      - name: Checkout contracts
+        uses: actions/checkout@v4
+        with:
+          repository: opensoha/soha-contracts
+          path: soha-contracts
+          token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
           cache: true
           cache-dependency-path: soha-agent/go.sum
+      - name: Check Go module state
+        working-directory: soha-agent
+        run: |
+          GOWORK=off go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Verify Go module checksums
+        working-directory: soha-agent
+        run: GOWORK=off go mod verify
       - name: Test
         working-directory: soha-agent
         run: GOWORK=off go test ./...
@@ -31,9 +45,16 @@ jobs:
       - name: Govulncheck
         working-directory: soha-agent
         run: GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
+      - name: Golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.9.0
+          working-directory: soha-agent
+          only-new-issues: true
+          args: --timeout=5m
       - name: Build
         working-directory: soha-agent
         run: GOWORK=off CGO_ENABLED=0 go build -o /tmp/soha-agent ./cmd/agent
       - name: Runner Docker build
         working-directory: soha-agent
-        run: docker build -f deploy/Dockerfile.hermes-agent-runner -t soha-agent:test .
+        run: docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile.hermes-agent-runner -t soha-agent:test .
