@@ -74,13 +74,36 @@ Local diagnostics are available from `GET /api/v1/diagnostics`; the response is 
 
 ## Docker
 
-The Hermes runner image can be built with:
+The generic cluster agent image can be built with:
 
 ```sh
-docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile.hermes-agent-runner -t soha-agent:hermes .
+make deploy-agent-image IMAGE_TAG=v0.1.0
 ```
 
-The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/arm64`) and binary archives for Linux, macOS, and Windows. Each archive has a `.sha256` sidecar plus a release-level `SHA256SUMS` manifest.
+The Hermes runner image can be built separately with:
+
+```sh
+make deploy-hermes-image IMAGE_TAG=v0.1.0
+```
+
+The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/arm64`) to Docker Hub as `yshanchui/soha-agent` and `yshanchui/soha-hermes-agent`, plus binary archives for Linux, macOS, and Windows. Each archive has a `.sha256` sidecar plus a release-level `SHA256SUMS` manifest.
+
+## Helm
+
+The deployable Helm charts are under `deploy/charts/`:
+
+```sh
+helm install soha-agent deploy/charts/soha-agent \
+  --namespace soha-agent \
+  --create-namespace \
+  --set secrets.agentBearerToken=REPLACE_WITH_AGENT_TOKEN \
+  --set secrets.controlPlaneBearerToken=REPLACE_WITH_RUNNER_TOKEN
+
+helm install soha-hermes-agent deploy/charts/soha-hermes-agent \
+  --namespace soha-agent \
+  --create-namespace \
+  --set secrets.controlPlaneBearerToken=REPLACE_WITH_RUNNER_TOKEN
+```
 
 ## License
 

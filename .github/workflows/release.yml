@@ -92,14 +92,29 @@ jobs:
           token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Login to GHCR
+      - name: Login to Docker Hub
         if: startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build multi-arch image
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build generic agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: soha-agent
+          file: soha-agent/deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: |
+            yshanchui/soha-agent:${{ github.event.inputs.version || github.ref_name }}
+            yshanchui/soha-agent:latest
+          build-contexts: |
+            contracts=./soha-contracts
+          build-args: |
+            VERSION=${{ github.event.inputs.version || github.ref_name }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
+      - name: Build Hermes runner image
         uses: docker/build-push-action@v6
         with:
           context: soha-agent
@@ -107,8 +122,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: |
-            ghcr.io/opensoha/soha-agent:${{ github.event.inputs.version || github.ref_name }}
-            ghcr.io/opensoha/soha-agent:latest
+            yshanchui/soha-hermes-agent:${{ github.event.inputs.version || github.ref_name }}
+            yshanchui/soha-hermes-agent:latest
           build-contexts: |
             contracts=./soha-contracts
           build-args: |

@@ -1,5 +1,6 @@
 .git
 .claude
+.cache
 bin
 tmp
 *.log
