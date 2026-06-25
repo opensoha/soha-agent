@@ -35,16 +35,16 @@ jobs:
             ext: ".exe"
     steps:
       - name: Checkout agent
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: soha-agent
       - name: Checkout contracts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: opensoha/soha-contracts
           path: soha-contracts
           token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.25.x"
           cache: true
@@ -69,7 +69,7 @@ jobs:
           tar -C dist -czf "${artifact}" "soha-agent${{ matrix.ext }}"
           shasum -a 256 "${artifact}" > "${artifact}.sha256"
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soha-agent-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -81,11 +81,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agent
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: soha-agent
       - name: Checkout contracts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: opensoha/soha-contracts
           path: soha-contracts
@@ -139,7 +139,7 @@ jobs:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
     steps:
       - name: Download linux amd64 binary artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: soha-agent-linux-amd64
           path: smoke
@@ -169,7 +169,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download binary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true
