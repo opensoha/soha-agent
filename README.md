@@ -93,7 +93,7 @@ The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/ar
 The Helm charts are published from `opensoha/soha-helm`:
 
 ```sh
-helm repo add opensoha https://raw.githubusercontent.com/opensoha/soha-helm/main
+helm repo add opensoha https://raw.githubusercontent.com/opensoha/soha-helm/gh-pages
 helm repo update
 helm install soha-agent opensoha/soha-agent \
   --namespace soha-agent \
