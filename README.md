@@ -90,16 +90,18 @@ The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/ar
 
 ## Helm
 
-The deployable Helm charts are under `deploy/charts/`:
+The Helm charts are published from `opensoha/soha-helm`:
 
 ```sh
-helm install soha-agent deploy/charts/soha-agent \
+helm repo add opensoha https://raw.githubusercontent.com/opensoha/soha-helm/main
+helm repo update
+helm install soha-agent opensoha/soha-agent \
   --namespace soha-agent \
   --create-namespace \
   --set secrets.agentBearerToken=REPLACE_WITH_AGENT_TOKEN \
   --set secrets.controlPlaneBearerToken=REPLACE_WITH_RUNNER_TOKEN
 
-helm install soha-hermes-agent deploy/charts/soha-hermes-agent \
+helm install soha-hermes-agent opensoha/soha-hermes-agent \
   --namespace soha-agent \
   --create-namespace \
   --set secrets.controlPlaneBearerToken=REPLACE_WITH_RUNNER_TOKEN
