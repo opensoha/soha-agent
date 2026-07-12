@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net/http"
 	"strings"
 	"sync"
 
@@ -22,14 +21,20 @@ type podTerminalMessage struct {
 	Rows    int    `json:"rows,omitempty"`
 }
 
-func registerPodTerminalRoutes(platform *gin.RouterGroup, client *k8sagent.Client, actions actionPolicy) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+func registerPodTerminalRoutes(
+	platform *gin.RouterGroup,
+	client *k8sagent.Client,
+	actions actionPolicy,
+	origins websocketOriginPolicy,
+) {
+	upgrader := websocket.Upgrader{CheckOrigin: origins.Check}
 	platform.GET("/workloads/pods/:name/terminal", actions.Require(actionPlatformPodsExec), func(c *gin.Context) {
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			return
 		}
 		defer conn.Close()
+		configureWebSocketReadLimit(conn)
 
 		ctx, cancel := context.WithCancel(c.Request.Context())
 		defer cancel()

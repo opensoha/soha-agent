@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
+
+const knownPublicProjectToken = "soha-1234567890123456789012345678901234567890"
 
 type Config struct {
 	App          AppConfig          `mapstructure:"app"`
@@ -40,7 +43,8 @@ type LoggerConfig struct {
 }
 
 type AuthConfig struct {
-	BearerToken string `mapstructure:"bearer_token"`
+	BearerToken     string `mapstructure:"bearer_token"`
+	BearerTokenFile string `mapstructure:"bearer_token_file"`
 }
 
 type SecurityConfig struct {
@@ -55,6 +59,7 @@ type ControlPlaneConfig struct {
 	Enabled         bool                `mapstructure:"enabled"`
 	BaseURL         string              `mapstructure:"base_url"`
 	BearerToken     string              `mapstructure:"bearer_token"`
+	BearerTokenFile string              `mapstructure:"bearer_token_file"`
 	AgentID         string              `mapstructure:"agent_id"`
 	RuntimeEndpoint string              `mapstructure:"runtime_endpoint"`
 	PollInterval    time.Duration       `mapstructure:"poll_interval"`
@@ -127,6 +132,9 @@ func Load() (Config, error) {
 	}
 
 	cfg.Kubernetes.Kubeconfig = os.ExpandEnv(cfg.Kubernetes.Kubeconfig)
+	if err := resolveBearerTokenFiles(&cfg); err != nil {
+		return Config{}, err
+	}
 	if err := Validate(cfg); err != nil {
 		return Config{}, err
 	}
@@ -166,6 +174,9 @@ func readConfig(v *viper.Viper) error {
 }
 
 func Validate(cfg Config) error {
+	if err := validateListenSecurity(cfg.HTTP.Addr, cfg.Auth.BearerToken); err != nil {
+		return err
+	}
 	if isProductionEnv(cfg.App.Env) {
 		if err := validateProductionToken("auth.bearer_token", cfg.Auth.BearerToken); err != nil {
 			return err
@@ -198,7 +209,7 @@ func Validate(cfg Config) error {
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("app.name", "soha-agent")
 	v.SetDefault("app.env", "development")
-	v.SetDefault("http.addr", ":18080")
+	v.SetDefault("http.addr", "127.0.0.1:18080")
 	v.SetDefault("http.base_path", "/api/v1")
 	v.SetDefault("http.read_timeout", "15s")
 	v.SetDefault("http.write_timeout", "15s")
@@ -206,11 +217,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("logger.level", "debug")
 	v.SetDefault("logger.format", "console")
 	v.SetDefault("auth.bearer_token", "")
+	v.SetDefault("auth.bearer_token_file", "")
 	v.SetDefault("security.allowed_actions", []string{})
 	v.SetDefault("audit.file_path", "")
 	v.SetDefault("control_plane.enabled", false)
 	v.SetDefault("control_plane.base_url", "http://127.0.0.1:8080")
 	v.SetDefault("control_plane.bearer_token", "")
+	v.SetDefault("control_plane.bearer_token_file", "")
 	v.SetDefault("control_plane.agent_id", "local-agent")
 	v.SetDefault("control_plane.runtime_endpoint", "http://127.0.0.1:18080")
 	v.SetDefault("control_plane.poll_interval", "5s")
@@ -257,14 +270,49 @@ func isProductionEnv(value string) bool {
 }
 
 func validateProductionToken(name, value string) error {
-	token := strings.TrimSpace(value)
-	if isUnsafeToken(token) {
-		return fmt.Errorf("%s is required in production and must not use a demo token", name)
+	if isUnsafeToken(value) {
+		return fmt.Errorf("%s is required in production and must not use an unsafe placeholder token", name)
 	}
-	if len(token) < 32 {
+	if len(strings.TrimSpace(value)) < 32 {
 		return fmt.Errorf("%s must be at least 32 characters in production", name)
 	}
 	return nil
+}
+
+func validateListenSecurity(addr, token string) error {
+	loopback, err := isLoopbackListenAddress(addr)
+	if err != nil {
+		return err
+	}
+	if loopback {
+		return nil
+	}
+	if isUnsafeToken(token) {
+		return fmt.Errorf(
+			"auth.bearer_token is required when http.addr listens beyond loopback and must not use an unsafe placeholder token",
+		)
+	}
+	if len(strings.TrimSpace(token)) < 32 {
+		return fmt.Errorf("auth.bearer_token must be at least 32 characters when http.addr listens beyond loopback")
+	}
+	return nil
+}
+
+func isLoopbackListenAddress(addr string) (bool, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false, nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false, fmt.Errorf("http.addr must be a valid host:port address: %w", err)
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true, nil
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback(), nil
 }
 
 func isUnsafeToken(value string) bool {
@@ -276,7 +324,7 @@ func isUnsafeToken(value string) bool {
 		return true
 	}
 	switch normalized {
-	case "demo", "changeme", "change-me", "replace-me", "replace-with-runtime-token":
+	case knownPublicProjectToken, "demo", "changeme", "change-me", "replace-me", "replace-with-runtime-token":
 		return true
 	default:
 		return false

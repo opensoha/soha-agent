@@ -3,7 +3,7 @@ app:
   env: development
 
 http:
-  addr: :18080
+  addr: 127.0.0.1:18080
   base_path: /api/v1
   read_timeout: 15s
   write_timeout: 15s
@@ -19,6 +19,7 @@ logger:
 
 auth:
   bearer_token: demo-agent-token
+  bearer_token_file: ""
 
 security:
   allowed_actions:
@@ -52,6 +53,7 @@ control_plane:
   enabled: true
   base_url: http://127.0.0.1:8080
   bearer_token: demo-execution-runner-token
+  bearer_token_file: ""
   agent_id: local-agent
   runtime_endpoint: http://127.0.0.1:18080
   poll_interval: 5s

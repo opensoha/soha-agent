@@ -143,8 +143,13 @@ func (e errInvalidPortForward) Error() string {
 	return string(e)
 }
 
-func registerPortForwardRoutes(platform *gin.RouterGroup, registry *portForwardRegistry, actions actionPolicy) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+func registerPortForwardRoutes(
+	platform *gin.RouterGroup,
+	registry *portForwardRegistry,
+	actions actionPolicy,
+	origins websocketOriginPolicy,
+) {
+	upgrader := websocket.Upgrader{CheckOrigin: origins.Check}
 	platform.GET("/network/port-forwards", func(c *gin.Context) {
 		apiresponse.Items(c, http.StatusOK, registry.list())
 	})
@@ -176,6 +181,7 @@ func registerPortForwardRoutes(platform *gin.RouterGroup, registry *portForwardR
 			return
 		}
 		defer conn.Close()
+		configureWebSocketReadLimit(conn)
 		targetConn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(session.localPort)), 5*time.Second)
 		if err != nil {
 			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "port-forward tunnel is unavailable"))

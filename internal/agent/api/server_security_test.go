@@ -46,6 +46,26 @@ func TestWriteErrorDoesNotExposeInternalError(t *testing.T) {
 	}
 }
 
+func TestServerDoesNotTrustForwardedClientIP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := New(cfgpkg.Config{HTTP: cfgpkg.HTTPConfig{BasePath: "/api/v1"}}, zap.NewNop(), nil, nil)
+	router, ok := server.httpServer.Handler.(*gin.Engine)
+	if !ok {
+		t.Fatalf("handler type = %T, want *gin.Engine", server.httpServer.Handler)
+	}
+	router.GET("/client-ip", func(c *gin.Context) { c.String(http.StatusOK, c.ClientIP()) })
+
+	req := httptest.NewRequest(http.MethodGet, "/client-ip", nil)
+	req.RemoteAddr = "127.0.0.1:43210"
+	req.Header.Set("X-Forwarded-For", "203.0.113.25")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if got := recorder.Body.String(); got != "127.0.0.1" {
+		t.Fatalf("ClientIP() = %q, want remote peer", got)
+	}
+}
+
 func TestDockerRuntimeWriteErrorDoesNotExposeInternalError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -223,7 +243,7 @@ func TestPortForwardRegisterListAndDeleteWhenAllowlisted(t *testing.T) {
 		}
 		return runtime, nil
 	})
-	registerPortForwardRoutes(platform, registry, actions)
+	registerPortForwardRoutes(platform, registry, actions, newWebSocketOriginPolicy(nil, "agent-token"))
 	httpServer := httptest.NewServer(router)
 	defer httpServer.Close()
 
@@ -264,6 +284,27 @@ func TestPortForwardRegisterListAndDeleteWhenAllowlisted(t *testing.T) {
 
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer agent-token")
+	untrustedHeaders := headers.Clone()
+	untrustedHeaders.Set("Origin", "https://evil.example")
+	untrustedConn, untrustedResp, untrustedErr := websocket.DefaultDialer.Dial(
+		strings.Replace(httpServer.URL, "http://", "ws://", 1)+"/api/v1/platform/network/port-forwards/"+createBody.Data.SessionID+"/tunnel",
+		untrustedHeaders,
+	)
+	if untrustedConn != nil {
+		_ = untrustedConn.Close()
+	}
+	if untrustedResp != nil {
+		defer func() {
+			_ = untrustedResp.Body.Close()
+		}()
+	}
+	if untrustedErr == nil {
+		t.Fatal("untrusted origin Dial() succeeded, want rejection")
+	}
+	if untrustedResp == nil || untrustedResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("untrusted origin status = %v, want %d", responseStatus(untrustedResp), http.StatusForbidden)
+	}
+
 	conn, resp, err := websocket.DefaultDialer.Dial(strings.Replace(httpServer.URL, "http://", "ws://", 1)+"/api/v1/platform/network/port-forwards/"+createBody.Data.SessionID+"/tunnel", headers)
 	if err != nil {
 		if resp != nil {

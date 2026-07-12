@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +18,63 @@ func TestValidateRequiresProductionAgentToken(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Validate() succeeded, want production token error")
+	}
+}
+
+func TestValidateListenSecurity(t *testing.T) {
+	tests := []struct {
+		name    string
+		addr    string
+		token   string
+		wantErr string
+	}{
+		{name: "default wildcard requires token", addr: ":18080", wantErr: "listens beyond loopback"},
+		{name: "IPv4 wildcard requires token", addr: "0.0.0.0:18080", wantErr: "listens beyond loopback"},
+		{name: "IPv6 wildcard requires token", addr: "[::]:18080", wantErr: "listens beyond loopback"},
+		{name: "non-loopback development requires token", addr: "192.0.2.10:18080", wantErr: "listens beyond loopback"},
+		{
+			name:    "non-loopback rejects short token",
+			addr:    "192.0.2.10:18080",
+			token:   "short-token",
+			wantErr: "at least 32 characters",
+		},
+		{
+			name:    "non-loopback rejects long demo token",
+			addr:    "192.0.2.10:18080",
+			token:   "demo-token-that-is-longer-than-thirty-two-characters",
+			wantErr: "unsafe placeholder token",
+		},
+		{
+			name:    "non-loopback rejects known public token",
+			addr:    "192.0.2.10:18080",
+			token:   knownPublicProjectToken,
+			wantErr: "unsafe placeholder token",
+		},
+		{name: "non-loopback accepts strong token", addr: "192.0.2.10:18080", token: productionAgentToken},
+		{name: "IPv4 loopback allows empty token", addr: "127.0.0.1:18080"},
+		{name: "IPv4 loopback range allows empty token", addr: "127.0.0.2:18080"},
+		{name: "IPv6 loopback allows empty token", addr: "[::1]:18080"},
+		{name: "localhost allows empty token", addr: "localhost:18080"},
+		{name: "invalid address rejected", addr: "127.0.0.1", wantErr: "valid host:port"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Validate(Config{
+				App:  AppConfig{Env: "development"},
+				HTTP: HTTPConfig{Addr: tt.addr},
+				Auth: AuthConfig{BearerToken: tt.token},
+			})
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -200,5 +258,22 @@ func TestLoadUsesExplicitConfigFile(t *testing.T) {
 	}
 	if cfg.App.Name != "custom-agent" {
 		t.Fatalf("App.Name = %q, want custom-agent", cfg.App.Name)
+	}
+}
+
+func TestLoadUsesLoopbackDefaultAddress(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.config.yaml")
+	if err := os.WriteFile(path, []byte("app:\n  name: custom-agent\n"), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	t.Setenv("SOHA_AGENT_CONFIG_FILE", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.HTTP.Addr != "127.0.0.1:18080" {
+		t.Fatalf("HTTP.Addr = %q, want loopback default", cfg.HTTP.Addr)
 	}
 }
