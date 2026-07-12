@@ -1,11 +1,13 @@
 package kubernetes
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
-	helmchart "helm.sh/helm/v3/pkg/chart"
-	helmreleasepkg "helm.sh/helm/v3/pkg/release"
+	helmchart "helm.sh/helm/v4/pkg/chart/v2"
+	helmreleasecommon "helm.sh/helm/v4/pkg/release/common"
+	helmreleasepkg "helm.sh/helm/v4/pkg/release/v1"
 
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
 )
@@ -46,7 +48,7 @@ func TestMapAgentHelmChartInstallResultIncludesManifestResources(t *testing.T) {
 		Namespace: "platform",
 		Version:   3,
 		Info: &helmreleasepkg.Info{
-			Status:      helmreleasepkg.StatusDeployed,
+			Status:      helmreleasecommon.StatusDeployed,
 			Description: "install complete",
 			Notes:       "ready",
 		},
@@ -82,7 +84,7 @@ metadata:
 func TestAgentHelmSDKReleaseSatisfiesInstall(t *testing.T) {
 	release := &helmreleasepkg.Release{
 		Version: 1,
-		Info:    &helmreleasepkg.Info{Status: helmreleasepkg.StatusDeployed},
+		Info:    &helmreleasepkg.Info{Status: helmreleasecommon.StatusDeployed},
 		Chart: &helmchart.Chart{Metadata: &helmchart.Metadata{
 			Name:    "nginx",
 			Version: "1.2.3",
@@ -92,7 +94,7 @@ func TestAgentHelmSDKReleaseSatisfiesInstall(t *testing.T) {
 	if !agentHelmSDKReleaseSatisfiesInstall(release, input) {
 		t.Fatal("agentHelmSDKReleaseSatisfiesInstall() = false, want true")
 	}
-	release.Info.Status = helmreleasepkg.StatusFailed
+	release.Info.Status = helmreleasecommon.StatusFailed
 	if agentHelmSDKReleaseSatisfiesInstall(release, input) {
 		t.Fatal("failed release satisfied install")
 	}
@@ -101,9 +103,22 @@ func TestAgentHelmSDKReleaseSatisfiesInstall(t *testing.T) {
 func TestAgentHelmReleaseNameUnavailableErrorIncludesStatusAndRevision(t *testing.T) {
 	err := agentHelmReleaseNameUnavailableError("edge", "platform", &helmreleasepkg.Release{
 		Version: 4,
-		Info:    &helmreleasepkg.Info{Status: helmreleasepkg.StatusFailed},
+		Info:    &helmreleasepkg.Info{Status: helmreleasecommon.StatusFailed},
 	})
 	if err == nil || !strings.Contains(err.Error(), "failed") || !strings.Contains(err.Error(), "revision 4") {
 		t.Fatalf("error = %v, want status and revision", err)
+	}
+}
+
+func TestIsAgentHelmReleaseNameInUseErrorAcceptsHelmV4Message(t *testing.T) {
+	err := errors.New("release name check failed: cannot reuse a name that is still in use")
+	if !isAgentHelmReleaseNameInUseError(err) {
+		t.Fatal("Helm v4 release-name conflict was not recognized")
+	}
+}
+
+func TestAgentHelmReleaseV1RejectsUnsupportedRelease(t *testing.T) {
+	if _, err := agentHelmReleaseV1(struct{}{}); err == nil {
+		t.Fatal("agentHelmReleaseV1() succeeded for unsupported release type")
 	}
 }

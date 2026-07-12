@@ -5,16 +5,19 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/cli"
-	helmreleasepkg "helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v4/pkg/action"
+	"helm.sh/helm/v4/pkg/chart/loader"
+	"helm.sh/helm/v4/pkg/cli"
+	"helm.sh/helm/v4/pkg/kube"
+	helmreleasepkg "helm.sh/helm/v4/pkg/release"
+	helmreleasev1 "helm.sh/helm/v4/pkg/release/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
@@ -59,8 +62,12 @@ func (c *Client) InstallHelmChart(ctx context.Context, input domainresource.Helm
 	installer.ReleaseName = input.ReleaseName
 	installer.Namespace = input.Namespace
 	installer.CreateNamespace = input.CreateNamespace
-	installer.Wait = input.Wait
 	installer.WaitForJobs = input.Wait
+	installer.ServerSideApply = false
+	installer.WaitStrategy = kube.HookOnlyStrategy
+	if input.Wait {
+		installer.WaitStrategy = kube.LegacyStrategy
+	}
 	installer.Timeout = time.Duration(input.TimeoutSeconds) * time.Second
 	installer.DependencyUpdate = true
 	installer.ChartPathOptions.RepoURL = input.RepositoryURL
@@ -86,7 +93,11 @@ func (c *Client) InstallHelmChart(ctx context.Context, input domainresource.Helm
 		}
 		return domainresource.HelmChartInstallResult{}, fmt.Errorf("install helm chart: %w", err)
 	}
-	return mapAgentHelmChartInstallResult(release), nil
+	releaseV1, err := agentHelmReleaseV1(release)
+	if err != nil {
+		return domainresource.HelmChartInstallResult{}, fmt.Errorf("read installed helm release: %w", err)
+	}
+	return mapAgentHelmChartInstallResult(releaseV1), nil
 }
 
 func (c *Client) UpdateHelmReleaseValues(ctx context.Context, namespace, name, content string) (domainresource.HelmValuesView, error) {
@@ -105,26 +116,34 @@ func (c *Client) UpdateHelmReleaseValues(ctx context.Context, namespace, name, c
 	if err != nil {
 		return domainresource.HelmValuesView{}, fmt.Errorf("get helm release %s: %w", name, err)
 	}
-	if current == nil || current.Chart == nil {
+	currentV1, err := agentHelmReleaseV1(current)
+	if err != nil {
+		return domainresource.HelmValuesView{}, fmt.Errorf("read helm release %s: %w", name, err)
+	}
+	if currentV1 == nil || currentV1.Chart == nil {
 		return domainresource.HelmValuesView{}, fmt.Errorf("helm release %s has no chart payload", name)
 	}
 	upgrader := action.NewUpgrade(actionConfig)
 	upgrader.Namespace = namespace
 	upgrader.ResetValues = true
-	upgrader.Wait = true
+	upgrader.WaitStrategy = kube.LegacyStrategy
 	upgrader.WaitForJobs = true
 	upgrader.Timeout = time.Duration(defaultAgentHelmTimeoutSeconds) * time.Second
-	release, err := upgrader.RunWithContext(ctx, name, current.Chart, values)
+	release, err := upgrader.RunWithContext(ctx, name, currentV1.Chart, values)
 	if err != nil {
 		return domainresource.HelmValuesView{}, fmt.Errorf("update helm release values %s: %w", name, err)
 	}
-	if release == nil {
+	releaseV1, err := agentHelmReleaseV1(release)
+	if err != nil {
+		return domainresource.HelmValuesView{}, fmt.Errorf("read updated helm release %s: %w", name, err)
+	}
+	if releaseV1 == nil {
 		return domainresource.HelmValuesView{}, fmt.Errorf("update helm release values %s returned no release", name)
 	}
 	return domainresource.HelmValuesView{
-		Name:        strings.TrimSpace(release.Name),
-		Namespace:   strings.TrimSpace(release.Namespace),
-		Revision:    strconv.Itoa(release.Version),
+		Name:        strings.TrimSpace(releaseV1.Name),
+		Namespace:   strings.TrimSpace(releaseV1.Namespace),
+		Revision:    strconv.Itoa(releaseV1.Version),
 		Content:     content,
 		Original:    content,
 		Editable:    true,
@@ -140,7 +159,7 @@ func (c *Client) DeleteHelmRelease(ctx context.Context, namespace, name string) 
 		return err
 	}
 	uninstaller := action.NewUninstall(actionConfig)
-	uninstaller.Wait = true
+	uninstaller.WaitStrategy = kube.LegacyStrategy
 	uninstaller.Timeout = time.Duration(defaultAgentHelmTimeoutSeconds) * time.Second
 	if _, err := uninstaller.Run(name); err != nil {
 		return fmt.Errorf("delete helm release %s: %w", name, err)
@@ -149,9 +168,9 @@ func (c *Client) DeleteHelmRelease(ctx context.Context, namespace, name string) 
 }
 
 func (c *Client) helmActionConfig(namespace string) (*action.Configuration, error) {
-	actionConfig := new(action.Configuration)
+	actionConfig := action.NewConfiguration(action.ConfigurationSetLogger(slog.NewTextHandler(io.Discard, nil)))
 	getter := agentHelmRESTClientGetter{restConfig: c.restConfig, namespace: namespace}
-	if err := actionConfig.Init(getter, namespace, "secrets", func(string, ...interface{}) {}); err != nil {
+	if err := actionConfig.Init(getter, namespace, "secrets"); err != nil {
 		return nil, fmt.Errorf("initialize helm action: %w", err)
 	}
 	return actionConfig, nil
@@ -217,17 +236,34 @@ func existingAgentHelmInstallResultFromSDK(actionConfig *action.Configuration, i
 		}
 		return domainresource.HelmChartInstallResult{}, false, fmt.Errorf("inspect existing helm release: %w", err)
 	}
-	if agentHelmSDKReleaseSatisfiesInstall(release, input) {
-		result := mapAgentHelmChartInstallResult(release)
+	releaseV1, err := agentHelmReleaseV1(release)
+	if err != nil {
+		return domainresource.HelmChartInstallResult{}, false, fmt.Errorf("read existing helm release: %w", err)
+	}
+	if agentHelmSDKReleaseSatisfiesInstall(releaseV1, input) {
+		result := mapAgentHelmChartInstallResult(releaseV1)
 		if strings.TrimSpace(result.Description) == "" {
 			result.Description = "Release already deployed; install request already satisfied"
 		}
 		return result, true, nil
 	}
-	return domainresource.HelmChartInstallResult{}, false, agentHelmReleaseNameUnavailableError(input.ReleaseName, input.Namespace, release)
+	return domainresource.HelmChartInstallResult{}, false, agentHelmReleaseNameUnavailableError(input.ReleaseName, input.Namespace, releaseV1)
 }
 
-func agentHelmSDKReleaseSatisfiesInstall(release *helmreleasepkg.Release, input domainresource.HelmChartInstallInput) bool {
+func agentHelmReleaseV1(release helmreleasepkg.Releaser) (*helmreleasev1.Release, error) {
+	switch typed := release.(type) {
+	case nil:
+		return nil, nil
+	case helmreleasev1.Release:
+		return &typed, nil
+	case *helmreleasev1.Release:
+		return typed, nil
+	default:
+		return nil, fmt.Errorf("unsupported helm release type %T", release)
+	}
+}
+
+func agentHelmSDKReleaseSatisfiesInstall(release *helmreleasev1.Release, input domainresource.HelmChartInstallInput) bool {
 	if release == nil || release.Chart == nil || release.Chart.Metadata == nil {
 		return false
 	}
@@ -248,7 +284,9 @@ func isAgentHelmReleaseNameInUseError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(strings.ToLower(err.Error()), "cannot re-use a name that is still in use")
+	lowered := strings.ToLower(err.Error())
+	return strings.Contains(lowered, "cannot re-use a name that is still in use") ||
+		strings.Contains(lowered, "cannot reuse a name that is still in use")
 }
 
 func isAgentHelmReleaseNotFoundError(err error) bool {
@@ -259,7 +297,7 @@ func isAgentHelmReleaseNotFoundError(err error) bool {
 	return strings.Contains(lowered, "release: not found") || strings.Contains(lowered, "not found")
 }
 
-func agentHelmReleaseNameUnavailableError(releaseName, namespace string, release *helmreleasepkg.Release) error {
+func agentHelmReleaseNameUnavailableError(releaseName, namespace string, release *helmreleasev1.Release) error {
 	status := ""
 	revision := ""
 	if release != nil {
@@ -282,7 +320,7 @@ func agentHelmReleaseNameUnavailableError(releaseName, namespace string, release
 	return fmt.Errorf("%s; choose another release name or uninstall the existing release before installing again", strings.Join(parts, ", "))
 }
 
-func mapAgentHelmChartInstallResult(release *helmreleasepkg.Release) domainresource.HelmChartInstallResult {
+func mapAgentHelmChartInstallResult(release *helmreleasev1.Release) domainresource.HelmChartInstallResult {
 	if release == nil {
 		return domainresource.HelmChartInstallResult{}
 	}

@@ -7,9 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -94,7 +92,12 @@ func registerDockerRuntimeRoutes(router *gin.Engine, cfg cfgpkg.Config, logger *
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	upgrader := websocket.Upgrader{CheckOrigin: dockerRuntimeOriginChecker(cfg.HTTP.AllowedOrigins)}
+	origins := newWebSocketOriginPolicy(
+		cfg.HTTP.AllowedOrigins,
+		cfg.Auth.BearerToken,
+		cfg.ControlPlane.BearerToken,
+	)
+	upgrader := websocket.Upgrader{CheckOrigin: origins.Check}
 	group := router.Group(fmt.Sprintf("%s/docker/runtime", cfg.HTTP.BasePath))
 	group.Use(authRequiredAnyMiddleware(cfg.Auth.BearerToken, cfg.ControlPlane.BearerToken))
 	{
@@ -145,6 +148,10 @@ func handleDockerRuntimeLogStream(c *gin.Context) {
 		return
 	}
 	defer cleanup()
+	if err := clearResponseWriteDeadline(c); err != nil {
+		apiresponse.Error(c, http.StatusInternalServerError, "stream_unavailable", "streaming response is unavailable")
+		return
+	}
 
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Cache-Control", "no-cache")
@@ -165,6 +172,7 @@ func handleDockerRuntimeTerminal(upgrader websocket.Upgrader) gin.HandlerFunc {
 			return
 		}
 		defer conn.Close()
+		configureWebSocketReadLimit(conn)
 
 		var initMessage dockerRuntimeMessage
 		if err := conn.ReadJSON(&initMessage); err != nil {
@@ -765,58 +773,6 @@ func boolValueAny(value any) bool {
 	default:
 		return false
 	}
-}
-
-func dockerRuntimeOriginChecker(allowedOrigins []string) func(*http.Request) bool {
-	allowed := normalizeDockerRuntimeAllowedOrigins(allowedOrigins)
-	return func(r *http.Request) bool {
-		origin := strings.TrimSpace(r.Header.Get("Origin"))
-		if origin == "" {
-			return true
-		}
-		parsed, err := url.Parse(origin)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return false
-		}
-		if _, ok := allowed[dockerRuntimeOriginKey(parsed)]; ok {
-			return true
-		}
-		if strings.EqualFold(parsed.Host, r.Host) {
-			return true
-		}
-		requestHost := dockerRuntimeHostName(r.Host)
-		originHost := dockerRuntimeHostName(parsed.Host)
-		return dockerRuntimeIsLocalHost(requestHost) && dockerRuntimeIsLocalHost(originHost)
-	}
-}
-
-func normalizeDockerRuntimeAllowedOrigins(values []string) map[string]struct{} {
-	allowed := map[string]struct{}{}
-	for _, value := range values {
-		parsed, err := url.Parse(strings.TrimSpace(value))
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			continue
-		}
-		allowed[dockerRuntimeOriginKey(parsed)] = struct{}{}
-	}
-	return allowed
-}
-
-func dockerRuntimeOriginKey(parsed *url.URL) string {
-	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
-}
-
-func dockerRuntimeHostName(hostport string) string {
-	host, _, err := net.SplitHostPort(hostport)
-	if err == nil {
-		return strings.Trim(host, "[]")
-	}
-	return strings.Trim(hostport, "[]")
-}
-
-func dockerRuntimeIsLocalHost(host string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(host))
-	return normalized == "localhost" || normalized == "127.0.0.1" || normalized == "::1" || strings.HasSuffix(normalized, ".localhost")
 }
 
 func shellQuote(value string) string {
