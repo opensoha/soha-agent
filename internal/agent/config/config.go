@@ -87,14 +87,17 @@ type DockerRunnerConfig struct {
 }
 
 type AgentRuntimeConfig struct {
-	Enabled       bool                           `mapstructure:"enabled"`
-	WorkerID      string                         `mapstructure:"worker_id"`
-	ProviderIDs   []string                       `mapstructure:"provider_ids"`
-	ProviderKinds []string                       `mapstructure:"provider_kinds"`
-	HermesCommand string                         `mapstructure:"hermes_command"`
-	WorkspaceRoot string                         `mapstructure:"workspace_root"`
-	PollInterval  time.Duration                  `mapstructure:"poll_interval"`
-	Providers     map[string]AgentProviderConfig `mapstructure:"providers"`
+	Enabled            bool                           `mapstructure:"enabled"`
+	WorkerID           string                         `mapstructure:"worker_id"`
+	ProviderIDs        []string                       `mapstructure:"provider_ids"`
+	ProviderKinds      []string                       `mapstructure:"provider_kinds"`
+	HermesCommand      string                         `mapstructure:"hermes_command"`
+	WorkspaceRoot      string                         `mapstructure:"workspace_root"`
+	PollInterval       time.Duration                  `mapstructure:"poll_interval"`
+	Environment        string                         `mapstructure:"environment"`
+	Labels             map[string]string              `mapstructure:"labels"`
+	ConformanceTimeout time.Duration                  `mapstructure:"conformance_timeout"`
+	Providers          map[string]AgentProviderConfig `mapstructure:"providers"`
 }
 
 type AgentProviderConfig struct {

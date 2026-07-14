@@ -97,6 +97,7 @@ control_plane:
         provider_skill_arg: -s
     workspace_root: ./.soha/agent-runtime
     poll_interval: 5s
+    conformance_timeout: 5s
 
 kubernetes:
   enabled: true

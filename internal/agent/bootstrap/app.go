@@ -45,7 +45,17 @@ func New(ctx context.Context) (*App, error) {
 		logger.Info("agent kubernetes client disabled; platform proxy routes will be unavailable")
 	}
 
-	runner := runnerpkg.New(cfg.ControlPlane, logger)
+	controlPlane := cfg.ControlPlane
+	if controlPlane.AgentRuntime.Environment == "" {
+		controlPlane.AgentRuntime.Environment = cfg.Kubernetes.Environment
+	}
+	if len(controlPlane.AgentRuntime.Labels) == 0 && len(cfg.Kubernetes.Labels) > 0 {
+		controlPlane.AgentRuntime.Labels = make(map[string]string, len(cfg.Kubernetes.Labels))
+		for key, value := range cfg.Kubernetes.Labels {
+			controlPlane.AgentRuntime.Labels[key] = value
+		}
+	}
+	runner := runnerpkg.New(controlPlane, logger)
 	runner.Start(lifecycleCtx)
 	server := agentapi.New(cfg, logger, client, runner)
 	return &App{Config: cfg, Logger: logger, Server: server, Runner: runner, cancel: cancel}, nil

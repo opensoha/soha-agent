@@ -97,13 +97,15 @@ type checkoutSpec struct {
 }
 
 type Runner struct {
-	cfg            cfgpkg.ControlPlaneConfig
-	httpClient     *http.Client
-	logger         *zap.Logger
-	executionSlots chan struct{}
-	mu             sync.RWMutex
-	active         map[string]*activeTaskState
-	metrics        *runnerMetrics
+	cfg                 cfgpkg.ControlPlaneConfig
+	httpClient          *http.Client
+	logger              *zap.Logger
+	executionSlots      chan struct{}
+	mu                  sync.RWMutex
+	active              map[string]*activeTaskState
+	metrics             *runnerMetrics
+	providerRegistry    *DynamicAgentProviderRegistry
+	providerConformance AgentProviderConformanceProbe
 }
 
 type ActiveTask struct {
@@ -195,16 +197,64 @@ func New(cfg cfgpkg.ControlPlaneConfig, logger *zap.Logger) *Runner {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	providerRegistry, err := NewDynamicAgentProviderRegistry(DefaultAgentProviderRegistry())
+	if err != nil {
+		panic(fmt.Sprintf("invalid built-in agent provider registry: %v", err))
+	}
 	return &Runner{
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
-		logger:         logger,
-		executionSlots: make(chan struct{}, cfg.MaxConcurrency),
-		active:         map[string]*activeTaskState{},
-		metrics:        &runnerMetrics{},
+		logger:           logger,
+		executionSlots:   make(chan struct{}, cfg.MaxConcurrency),
+		active:           map[string]*activeTaskState{},
+		metrics:          &runnerMetrics{},
+		providerRegistry: providerRegistry,
 	}
+}
+
+func (r *Runner) ApplyAgentProviderRegistrySnapshot(snapshot AgentProviderRegistry, now time.Time) AgentProviderRegistryApplyResult {
+	if r == nil || r.providerRegistry == nil {
+		return AgentProviderRegistryApplyResult{Revision: snapshot.Revision, Reason: "provider registry is unavailable", ObservedAt: now.UTC()}
+	}
+	identity := AgentFleetIdentity{
+		RunnerID: agentRuntimeWorkerID(r.cfg), Environment: r.cfg.AgentRuntime.Environment,
+		Platform: runtime.GOOS, Architecture: runtime.GOARCH, Labels: r.cfg.AgentRuntime.Labels,
+	}
+	return r.providerRegistry.ApplyDesired(
+		context.Background(), snapshot, identity, r.providerConformance,
+		r.cfg.AgentRuntime.ConformanceTimeout, now,
+	)
+}
+
+func (r *Runner) applyAgentProviderRegistrySnapshot(
+	ctx context.Context, snapshot AgentProviderRegistry, now time.Time,
+) AgentProviderRegistryApplyResult {
+	if r == nil || r.providerRegistry == nil {
+		return AgentProviderRegistryApplyResult{Revision: snapshot.Revision, DesiredRevision: snapshot.Revision, RolloutState: "rejected", Reason: "provider registry is unavailable", ObservedAt: now.UTC()}
+	}
+	identity := AgentFleetIdentity{
+		RunnerID: agentRuntimeWorkerID(r.cfg), Environment: r.cfg.AgentRuntime.Environment,
+		Platform: runtime.GOOS, Architecture: runtime.GOARCH, Labels: r.cfg.AgentRuntime.Labels,
+	}
+	return r.providerRegistry.ApplyDesired(
+		ctx, snapshot, identity, r.providerConformance,
+		r.cfg.AgentRuntime.ConformanceTimeout, now,
+	)
+}
+
+func (r *Runner) SetAgentProviderConformanceProbe(probe AgentProviderConformanceProbe) {
+	if r != nil {
+		r.providerConformance = probe
+	}
+}
+
+func (r *Runner) AgentProviderRuntimeStatuses() []AgentProviderRuntimeStatus {
+	if r == nil || r.providerRegistry == nil {
+		return []AgentProviderRuntimeStatus{}
+	}
+	return r.providerRegistry.Statuses()
 }
 
 func (r *Runner) apiClient() *sohaapi.Client {
@@ -372,6 +422,7 @@ func (r *Runner) Start(ctx context.Context) {
 		go r.dockerLoop(ctx)
 	}
 	if r.cfg.AgentRuntime.Enabled {
+		go r.agentProviderRegistryLoop(ctx)
 		go r.agentRuntimeLoop(ctx)
 	}
 }
@@ -985,19 +1036,14 @@ func (r *Runner) executeHermesAgentRun(ctx context.Context, run AgentRun) (map[s
 
 type agentProviderExecutor func(context.Context, AgentRun) (map[string]any, []string, error)
 
-type agentProviderCommandSpec struct {
-	Command          string
-	Args             []string
-	PromptArg        string
-	SkillArg         string
-	ProviderSkillArg string
-}
+type agentProviderCommandSpec = AgentProviderCommandSpec
 
 func (r *Runner) resolveAgentProviderExecutor(run AgentRun) agentProviderExecutor {
 	providerKey := normalizedAgentProviderKey(run)
+	var executor agentProviderExecutor
 	switch providerKey {
 	case "hermes":
-		return r.executeHermesAgentRun
+		executor = r.executeHermesAgentRun
 	default:
 		spec := r.agentProviderCommandSpec(providerKey)
 		if strings.TrimSpace(spec.Command) == "" {
@@ -1009,9 +1055,23 @@ func (r *Runner) resolveAgentProviderExecutor(run AgentRun) agentProviderExecuto
 				}, nil, fmt.Errorf("agent provider %q is not configured on this runner", firstNonEmpty(run.ProviderID, run.ProviderKind))
 			}
 		}
-		return func(ctx context.Context, current AgentRun) (map[string]any, []string, error) {
+		executor = func(ctx context.Context, current AgentRun) (map[string]any, []string, error) {
 			return r.executeCLIAgentRun(ctx, current, spec)
 		}
+	}
+	if r.providerRegistry == nil {
+		return executor
+	}
+	if _, registered := r.providerRegistry.Resolve(providerKey, ""); !registered {
+		return executor
+	}
+	return func(ctx context.Context, current AgentRun) (map[string]any, []string, error) {
+		provider, err := r.providerRegistry.Acquire(providerKey, "")
+		if err != nil {
+			return map[string]any{"provider": providerKey, "error": err.Error()}, nil, err
+		}
+		defer r.providerRegistry.Release(provider.ID)
+		return executor(ctx, current)
 	}
 }
 
@@ -1918,6 +1978,16 @@ func (r *Runner) agentProviderCommandSpec(providerKey string) agentProviderComma
 	}
 	if spec, ok := r.cfg.AgentRuntime.Providers[providerKey]; ok {
 		return normalizeAgentProviderCommandSpec(spec)
+	}
+	if r.providerRegistry != nil {
+		if provider, ok := r.providerRegistry.Resolve(providerKey, ""); ok && !provider.Draining && provider.Runtime.Kind == "cli" {
+			spec := provider.commandSpec()
+			command := strings.TrimSpace(r.cfg.AgentRuntime.HermesCommand)
+			if command != "" && provider.Kind == "hermes" {
+				spec.Command = command
+			}
+			return spec
+		}
 	}
 	if provider, ok := defaultAgentProviderDefinition(providerKey); ok {
 		spec := provider.DefaultCommand
