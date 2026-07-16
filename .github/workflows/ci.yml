@@ -57,7 +57,7 @@ jobs:
         run: GOWORK=off CGO_ENABLED=0 go build -o /tmp/soha-agent ./cmd/agent
       - name: Agent Docker build
         working-directory: soha-agent
-        run: docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile -t yshanchui/soha-agent:test .
+        run: docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile -t ghcr.io/opensoha/soha-agent:test .
       - name: Hermes runner Docker build
         working-directory: soha-agent
-        run: docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile.hermes-agent-runner -t yshanchui/soha-hermes-agent:test .
+        run: docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile.hermes-agent-runner -t ghcr.io/opensoha/soha-hermes-agent:test .
