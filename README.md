@@ -86,7 +86,7 @@ The Hermes runner image can be built separately with:
 make deploy-hermes-image IMAGE_TAG=v0.1.0
 ```
 
-The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/arm64`) to Docker Hub as `yshanchui/soha-agent` and `yshanchui/soha-hermes-agent`, plus binary archives for Linux, macOS, and Windows. Each archive has a `.sha256` sidecar plus a release-level `SHA256SUMS` manifest.
+The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/arm64`) to GHCR as `ghcr.io/opensoha/soha-agent` and `ghcr.io/opensoha/soha-hermes-agent`, plus binary archives for Linux, macOS, and Windows. Each archive has a `.sha256` sidecar plus a release-level `SHA256SUMS` manifest.
 
 ## Helm
 

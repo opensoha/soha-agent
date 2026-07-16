@@ -3,8 +3,8 @@ IMAGE_PLATFORMS ?= linux/amd64,linux/arm64
 GOPROXY ?= https://proxy.golang.org,direct
 PUSH_LATEST ?= 0
 SOHA_CONTRACTS_DIR ?= $(abspath ../soha-contracts)
-AGENT_IMAGE_REPOSITORY ?= yshanchui/soha-agent
-HERMES_IMAGE_REPOSITORY ?= yshanchui/soha-hermes-agent
+AGENT_IMAGE_REPOSITORY ?= ghcr.io/opensoha/soha-agent
+HERMES_IMAGE_REPOSITORY ?= ghcr.io/opensoha/soha-hermes-agent
 
 AGENT_IMAGE_TAGS = -t $(AGENT_IMAGE_REPOSITORY):$(IMAGE_TAG)
 HERMES_IMAGE_TAGS = -t $(HERMES_IMAGE_REPOSITORY):$(IMAGE_TAG)
