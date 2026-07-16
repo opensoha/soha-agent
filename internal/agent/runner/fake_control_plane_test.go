@@ -107,6 +107,52 @@ func TestExecutionRunnerFakeControlPlaneCompletesWithCallbackRetryAndMetrics(t *
 	}
 }
 
+func TestRunnerNoContentClaimsAreIdle(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/v1/delivery/execution-tasks/claim", "/api/v1/docker/operations/claim":
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Status:     http.StatusText(http.StatusNoContent),
+				Header:     make(http.Header),
+				Body:       http.NoBody,
+				Request:    r,
+			}, nil
+		default:
+			t.Fatalf("unexpected fake control-plane request %s %s", r.Method, r.URL.Path)
+			return nil, nil
+		}
+	})
+
+	executionRunner := New(cfgpkg.ControlPlaneConfig{
+		BaseURL:       "http://control-plane",
+		BearerToken:   "runner-token",
+		ProviderKinds: []string{"ci_agent_runner"},
+	}, zap.NewNop())
+	executionRunner.httpClient = &http.Client{Transport: transport}
+	if task, ok := executionRunner.claim(context.Background()); ok || task.ID != "" {
+		t.Fatalf("execution claim = %#v, %t, want idle miss", task, ok)
+	}
+	if metrics := executionRunner.MetricsSnapshot().Execution; metrics.Claims != 0 || metrics.ClaimMisses != 1 {
+		t.Fatalf("execution claim metrics = %#v, want one miss", metrics)
+	}
+
+	dockerRunner := New(cfgpkg.ControlPlaneConfig{
+		BaseURL:     "http://control-plane",
+		BearerToken: "runner-token",
+		Docker: cfgpkg.DockerRunnerConfig{
+			OperationKinds: []string{"host_sync"},
+		},
+	}, zap.NewNop())
+	dockerRunner.httpClient = &http.Client{Transport: transport}
+	if operation, ok := dockerRunner.claimDockerOperation(context.Background()); ok || operation.ID != "" {
+		t.Fatalf("Docker claim = %#v, %t, want idle miss", operation, ok)
+	}
+	if metrics := dockerRunner.MetricsSnapshot().Docker; metrics.Claims != 0 || metrics.ClaimMisses != 1 {
+		t.Fatalf("Docker claim metrics = %#v, want one miss", metrics)
+	}
+}
+
 func TestExecutionRunnerTimeoutSendsFinalStateWithDetachedContext(t *testing.T) {
 	task := ExecutionTask{
 		ID:            "task-timeout",
