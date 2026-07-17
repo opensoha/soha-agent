@@ -156,6 +156,7 @@ func TestValidateAllowsProductionRuntimeParityActionAllowlist(t *testing.T) {
 		Auth: AuthConfig{BearerToken: productionAgentToken},
 		Security: SecurityConfig{AllowedActions: []string{
 			"platform.resources.apply",
+			"platform.resources.create",
 			"platform.resources.delete",
 			"platform.custom_resources.list",
 			"platform.custom_resources.create",

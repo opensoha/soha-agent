@@ -194,6 +194,7 @@ var managedAgentDiagnosticCapabilityKeys = []string{
 	"pod.logs",
 	"pod.exec",
 	"workload.mutations",
+	"resource.creation",
 	"helm.releases",
 }
 
@@ -252,6 +253,11 @@ func buildDiagnosticsCapabilitiesView(cfg cfgpkg.Config, kubernetesClientAvailab
 			actionPlatformStatefulSetRestart,
 			actionPlatformStatefulSetScale,
 			actionPlatformDaemonSetRestart,
+		),
+		guardedCapabilityItem("resource.creation",
+			cfg.Security.AllowedActions,
+			"resource create action is not allowlisted",
+			actionPlatformResourcesCreate,
 		),
 		guardedCapabilityItem("helm.releases",
 			cfg.Security.AllowedActions,

@@ -573,10 +573,10 @@ func TestDiagnosticsEndpointReturnsSafeRuntimeSummary(t *testing.T) {
 	if !body.Data.Kubernetes.Enabled || body.Data.Kubernetes.ClientAvailable || !body.Data.Kubernetes.KubeconfigConfigured || !body.Data.Kubernetes.KubeconfigDataLoaded || body.Data.Kubernetes.LabelsCount != 1 {
 		t.Fatalf("unexpected kubernetes diagnostics: %#v", body.Data.Kubernetes)
 	}
-	if body.Data.Capabilities.Mode != "agent" || body.Data.Capabilities.Status != "degraded" || len(body.Data.Capabilities.RequiredKeys) != 8 || len(body.Data.Capabilities.DegradedKeys) != 8 {
+	if body.Data.Capabilities.Mode != "agent" || body.Data.Capabilities.Status != "degraded" || len(body.Data.Capabilities.RequiredKeys) != 9 || len(body.Data.Capabilities.DegradedKeys) != 9 {
 		t.Fatalf("unexpected capability diagnostics: %#v", body.Data.Capabilities)
 	}
-	if len(body.Data.Capabilities.Items) != 8 || body.Data.Capabilities.Items[0].Key != "cluster.inventory" || body.Data.Capabilities.Items[0].Status != "unsupported" || !strings.Contains(body.Data.Capabilities.Items[0].Reason, "kubernetes client") {
+	if len(body.Data.Capabilities.Items) != 9 || body.Data.Capabilities.Items[0].Key != "cluster.inventory" || body.Data.Capabilities.Items[0].Status != "unsupported" || !strings.Contains(body.Data.Capabilities.Items[0].Reason, "kubernetes client") {
 		t.Fatalf("unexpected capability item diagnostics: %#v", body.Data.Capabilities.Items)
 	}
 	if !body.Data.ControlPlane.Enabled || !body.Data.ControlPlane.BaseURLConfigured || body.Data.ControlPlane.MaxConcurrency != 3 {
@@ -598,7 +598,7 @@ func TestBuildDiagnosticsCapabilitiesReflectsManagedAgentAllowlist(t *testing.T)
 		Kubernetes: cfgpkg.KubernetesConfig{Enabled: true},
 		Security:   cfgpkg.SecurityConfig{AllowedActions: []string{"*"}},
 	}, true)
-	if available.Status != "available" || len(available.AvailableKeys) != 8 || len(available.DegradedKeys) != 0 {
+	if available.Status != "available" || len(available.AvailableKeys) != 9 || len(available.DegradedKeys) != 0 {
 		t.Fatalf("expected all capabilities available, got %#v", available)
 	}
 
@@ -617,6 +617,7 @@ func TestBuildDiagnosticsCapabilitiesReflectsManagedAgentAllowlist(t *testing.T)
 		"port.forward":       "partial",
 		"pod.exec":           "available",
 		"workload.mutations": "partial",
+		"resource.creation":  "partial",
 		"helm.releases":      "partial",
 	}
 	for _, item := range partial.Items {

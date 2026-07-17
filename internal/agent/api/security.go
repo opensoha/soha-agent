@@ -25,6 +25,7 @@ const (
 	actionPlatformStatefulSetScale        = "platform.statefulsets.scale"
 	actionPlatformDaemonSetRestart        = "platform.daemonsets.restart"
 	actionPlatformResourcesApply          = "platform.resources.apply"
+	actionPlatformResourcesCreate         = "platform.resources.create"
 	actionPlatformResourcesDelete         = "platform.resources.delete"
 	actionPlatformCustomResourcesList     = "platform.custom_resources.list"
 	actionPlatformCustomResourcesCreate   = "platform.custom_resources.create"

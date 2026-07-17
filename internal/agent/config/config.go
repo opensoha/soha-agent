@@ -361,6 +361,7 @@ func knownAction(action string) bool {
 		"platform.statefulsets.scale",
 		"platform.daemonsets.restart",
 		"platform.resources.apply",
+		"platform.resources.create",
 		"platform.resources.delete",
 		"platform.custom_resources.list",
 		"platform.custom_resources.create",

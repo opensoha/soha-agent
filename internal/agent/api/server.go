@@ -78,6 +78,7 @@ func registerPlatformRoutes(router *gin.Engine, cfg cfgpkg.Config, client *k8sag
 	platform := router.Group(fmt.Sprintf("%s/platform", cfg.HTTP.BasePath))
 	platform.Use(authMiddleware(cfg.Auth.BearerToken))
 	registerResourceYAMLRoutes(platform, client, actions)
+	registerResourceCreationRoutes(platform, client, actions)
 	registerCustomResourceRoutes(platform, client, actions)
 	origins := newWebSocketOriginPolicy(cfg.HTTP.AllowedOrigins, cfg.Auth.BearerToken)
 	registerPortForwardRoutes(
