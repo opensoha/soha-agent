@@ -2,10 +2,12 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
 	apiresponse "github.com/opensoha/soha-agent/internal/api/response"
+	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
 )
 
 func registerPlatformRBACRoutes(platform *gin.RouterGroup, client *k8sagent.Client) {
@@ -46,8 +48,19 @@ func registerPlatformRBACRoutes(platform *gin.RouterGroup, client *k8sagent.Clie
 		apiresponse.Item(c, http.StatusOK, item)
 	})
 	platform.GET("/access-control/rolebindings", func(c *gin.Context) {
-		namespace := c.Query("namespace")
-		items, err := client.ListRoleBindings(c.Request.Context(), namespace)
+		namespace := strings.TrimSpace(c.Query("namespace"))
+		subjectKind, subjectName, subjectNamespace, filtered := subjectFilter(c)
+		if filtered && (namespace == "" || !validServiceAccountFilter(subjectKind, subjectName, subjectNamespace)) {
+			apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "a complete ServiceAccount subject filter is required")
+			return
+		}
+		var items []domainresource.RoleBindingView
+		var err error
+		if filtered {
+			items, err = client.ListRoleBindingsForSubject(c.Request.Context(), namespace, subjectKind, subjectName, subjectNamespace)
+		} else {
+			items, err = client.ListRoleBindings(c.Request.Context(), namespace)
+		}
 		if err != nil {
 			writeError(c, err)
 			return
@@ -80,7 +93,18 @@ func registerPlatformRBACRoutes(platform *gin.RouterGroup, client *k8sagent.Clie
 		apiresponse.Item(c, http.StatusOK, item)
 	})
 	platform.GET("/access-control/clusterrolebindings", func(c *gin.Context) {
-		items, err := client.ListClusterRoleBindings(c.Request.Context())
+		subjectKind, subjectName, subjectNamespace, filtered := subjectFilter(c)
+		if filtered && !validServiceAccountFilter(subjectKind, subjectName, subjectNamespace) {
+			apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "a complete ServiceAccount subject filter is required")
+			return
+		}
+		var items []domainresource.ClusterRoleBindingView
+		var err error
+		if filtered {
+			items, err = client.ListClusterRoleBindingsForSubject(c.Request.Context(), subjectKind, subjectName, subjectNamespace)
+		} else {
+			items, err = client.ListClusterRoleBindings(c.Request.Context())
+		}
 		if err != nil {
 			writeError(c, err)
 			return
@@ -95,4 +119,16 @@ func registerPlatformRBACRoutes(platform *gin.RouterGroup, client *k8sagent.Clie
 		}
 		apiresponse.Item(c, http.StatusOK, item)
 	})
+}
+
+func subjectFilter(c *gin.Context) (kind, name, namespace string, requested bool) {
+	kind = strings.TrimSpace(c.Query("subjectKind"))
+	name = strings.TrimSpace(c.Query("subjectName"))
+	namespace = strings.TrimSpace(c.Query("subjectNamespace"))
+	requested = kind != "" || name != "" || namespace != ""
+	return kind, name, namespace, requested
+}
+
+func validServiceAccountFilter(kind, name, namespace string) bool {
+	return kind == "ServiceAccount" && name != "" && namespace != ""
 }

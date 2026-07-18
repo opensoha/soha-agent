@@ -5,9 +5,21 @@ import (
 	"testing"
 
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
+	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
 )
+
+func TestBuildServiceDetailIncludesEndpointsAndPods(t *testing.T) {
+	ready := true
+	detail := buildServiceDetail(corev1.Service{}, []discoveryv1.EndpointSlice{{Endpoints: []discoveryv1.Endpoint{{
+		Addresses: []string{"10.1.0.1"}, Conditions: discoveryv1.EndpointConditions{Ready: &ready},
+	}}}}, []domainresource.PodView{{Name: "api-1"}})
+	if len(detail.Endpoints) != 1 || detail.Endpoints[0].Ready == nil || !*detail.Endpoints[0].Ready || len(detail.BackendPods) != 1 {
+		t.Fatalf("buildServiceDetail() = %#v", detail)
+	}
+}
 
 func TestMapPodIncludesRequestsAndLimits(t *testing.T) {
 	t.Parallel()

@@ -36,6 +36,14 @@ func registerPlatformConfigurationRoutes(platform *gin.RouterGroup, client *k8sa
 		}
 		apiresponse.Items(c, http.StatusOK, items)
 	})
+	platform.GET("/configuration/hpas/:name/detail", func(c *gin.Context) {
+		item, err := client.GetHorizontalPodAutoscalerDetail(c.Request.Context(), c.Query("namespace"), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
 	platform.GET("/configuration/poddisruptionbudgets", func(c *gin.Context) {
 		namespace := c.Query("namespace")
 		items, err := client.ListPodDisruptionBudgets(c.Request.Context(), namespace)
@@ -44,6 +52,14 @@ func registerPlatformConfigurationRoutes(platform *gin.RouterGroup, client *k8sa
 			return
 		}
 		apiresponse.Items(c, http.StatusOK, items)
+	})
+	platform.GET("/configuration/poddisruptionbudgets/:name/detail", func(c *gin.Context) {
+		item, err := client.GetPodDisruptionBudgetDetail(c.Request.Context(), c.Query("namespace"), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
 	})
 	platform.GET("/configuration/priorityclasses", func(c *gin.Context) {
 		items, err := client.ListPriorityClasses(c.Request.Context())
@@ -69,6 +85,14 @@ func registerPlatformConfigurationRoutes(platform *gin.RouterGroup, client *k8sa
 		}
 		apiresponse.Items(c, http.StatusOK, items)
 	})
+	platform.GET("/configuration/mutatingwebhookconfigurations/:name/detail", func(c *gin.Context) {
+		item, err := client.GetMutatingWebhookConfigurationDetail(c.Request.Context(), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
 	platform.GET("/configuration/validatingwebhookconfigurations", func(c *gin.Context) {
 		items, err := client.ListValidatingWebhookConfigurations(c.Request.Context())
 		if err != nil {
@@ -76,6 +100,14 @@ func registerPlatformConfigurationRoutes(platform *gin.RouterGroup, client *k8sa
 			return
 		}
 		apiresponse.Items(c, http.StatusOK, items)
+	})
+	platform.GET("/configuration/validatingwebhookconfigurations/:name/detail", func(c *gin.Context) {
+		item, err := client.GetValidatingWebhookConfigurationDetail(c.Request.Context(), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
 	})
 	platform.GET("/configuration/resourcequotas", func(c *gin.Context) {
 		namespace := c.Query("namespace")
@@ -86,6 +118,14 @@ func registerPlatformConfigurationRoutes(platform *gin.RouterGroup, client *k8sa
 		}
 		apiresponse.Items(c, http.StatusOK, items)
 	})
+	platform.GET("/configuration/resourcequotas/:name/detail", func(c *gin.Context) {
+		item, err := client.GetResourceQuotaDetail(c.Request.Context(), c.Query("namespace"), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
 	platform.GET("/configuration/limitranges", func(c *gin.Context) {
 		namespace := c.Query("namespace")
 		items, err := client.ListLimitRanges(c.Request.Context(), namespace)
@@ -94,6 +134,14 @@ func registerPlatformConfigurationRoutes(platform *gin.RouterGroup, client *k8sa
 			return
 		}
 		apiresponse.Items(c, http.StatusOK, items)
+	})
+	platform.GET("/configuration/limitranges/:name/detail", func(c *gin.Context) {
+		item, err := client.GetLimitRangeDetail(c.Request.Context(), c.Query("namespace"), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
 	})
 	platform.GET("/configuration/leases", func(c *gin.Context) {
 		namespace := c.Query("namespace")

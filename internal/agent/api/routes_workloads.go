@@ -237,6 +237,22 @@ func registerPlatformControllerRoutes(platform *gin.RouterGroup, client *k8sagen
 		}
 		apiresponse.Items(c, http.StatusOK, items)
 	})
+	platform.GET("/workloads/replicasets/:name/detail", func(c *gin.Context) {
+		item, err := client.GetReplicaSetDetail(c.Request.Context(), c.Query("namespace"), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
+	platform.GET("/workloads/replicasets/:name/yaml", func(c *gin.Context) {
+		item, err := client.GetResourceYAML(c.Request.Context(), c.Query("namespace"), "ReplicaSet", c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
 	platform.GET("/workloads/cronjobs/:name/detail", func(c *gin.Context) {
 		namespace := c.Query("namespace")
 		item, err := client.GetCronJobDetail(c.Request.Context(), namespace, c.Param("name"))
@@ -263,5 +279,21 @@ func registerPlatformControllerRoutes(platform *gin.RouterGroup, client *k8sagen
 			return
 		}
 		apiresponse.Items(c, http.StatusOK, items)
+	})
+	platform.GET("/workloads/replicationcontrollers/:name/detail", func(c *gin.Context) {
+		item, err := client.GetReplicationControllerDetail(c.Request.Context(), c.Query("namespace"), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
+	platform.GET("/workloads/replicationcontrollers/:name/yaml", func(c *gin.Context) {
+		item, err := client.GetResourceYAML(c.Request.Context(), c.Query("namespace"), "ReplicationController", c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
 	})
 }

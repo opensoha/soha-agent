@@ -21,15 +21,16 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
@@ -47,6 +48,7 @@ type Client struct {
 	typed      kubernetes.Interface
 	dynamic    dynamic.Interface
 	discovery  discovery.DiscoveryInterface
+	metadata   metadata.Interface
 	restConfig *rest.Config
 }
 
@@ -67,7 +69,11 @@ func New(cfg cfgpkg.KubernetesConfig) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build discovery client: %w", err)
 	}
-	return &Client{cfg: cfg, typed: typedClient, dynamic: dynamicClient, discovery: discoveryClient, restConfig: restConfig}, nil
+	metadataClient, err := metadata.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("build metadata client: %w", err)
+	}
+	return &Client{cfg: cfg, typed: typedClient, dynamic: dynamicClient, discovery: discoveryClient, metadata: metadataClient, restConfig: restConfig}, nil
 }
 
 func (c *Client) Summary(_ context.Context) domaincluster.Summary {
@@ -287,17 +293,7 @@ func (c *Client) GetPodYAML(ctx context.Context, namespace, name string) (domain
 }
 
 func (c *Client) ListDeployments(ctx context.Context, namespace string) ([]domainresource.DeploymentView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := c.typed.AppsV1().Deployments(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.DeploymentView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapDeployment(item))
-	}
-	return views, nil
+	return c.listDeploymentSummaries(ctx, namespace)
 }
 
 func (c *Client) GetDeploymentDetail(ctx context.Context, namespace, name string) (domainresource.DeploymentDetailView, error) {
@@ -307,7 +303,14 @@ func (c *Client) GetDeploymentDetail(ctx context.Context, namespace, name string
 	if err != nil {
 		return domainresource.DeploymentDetailView{}, err
 	}
-	return mapDeploymentDetail(*item), nil
+	pods, relatedResources, err := c.loadWorkloadDetailRelations(queryCtx, namespace, item.Spec.Selector, item.OwnerReferences, item.Spec.Template, "")
+	if err != nil {
+		return domainresource.DeploymentDetailView{}, err
+	}
+	detail := mapDeploymentDetail(*item)
+	detail.Pods = pods
+	detail.RelatedResources = relatedResources
+	return detail, nil
 }
 
 func (c *Client) GetDeploymentYAML(ctx context.Context, namespace, name string) (domainresource.ResourceYAMLView, error) {
@@ -435,7 +438,14 @@ func (c *Client) GetStatefulSetDetail(ctx context.Context, namespace, name strin
 	if err != nil {
 		return domainresource.StatefulSetDetailView{}, err
 	}
-	return mapStatefulSetDetail(*item), nil
+	pods, relatedResources, err := c.loadWorkloadDetailRelations(queryCtx, namespace, item.Spec.Selector, item.OwnerReferences, item.Spec.Template, "")
+	if err != nil {
+		return domainresource.StatefulSetDetailView{}, err
+	}
+	detail := mapStatefulSetDetail(*item)
+	detail.Pods = pods
+	detail.RelatedResources = relatedResources
+	return detail, nil
 }
 
 func (c *Client) GetStatefulSetYAML(ctx context.Context, namespace, name string) (domainresource.ResourceYAMLView, error) {
@@ -455,17 +465,7 @@ func (c *Client) GetStatefulSetYAML(ctx context.Context, namespace, name string)
 }
 
 func (c *Client) ListDaemonSets(ctx context.Context, namespace string) ([]domainresource.DaemonSetView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := c.typed.AppsV1().DaemonSets(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.DaemonSetView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapDaemonSet(item))
-	}
-	return views, nil
+	return c.listDaemonSetSummaries(ctx, namespace)
 }
 
 func (c *Client) GetDaemonSetDetail(ctx context.Context, namespace, name string) (domainresource.DaemonSetDetailView, error) {
@@ -475,7 +475,14 @@ func (c *Client) GetDaemonSetDetail(ctx context.Context, namespace, name string)
 	if err != nil {
 		return domainresource.DaemonSetDetailView{}, err
 	}
-	return mapDaemonSetDetail(*item), nil
+	pods, relatedResources, err := c.loadWorkloadDetailRelations(queryCtx, namespace, item.Spec.Selector, item.OwnerReferences, item.Spec.Template, "")
+	if err != nil {
+		return domainresource.DaemonSetDetailView{}, err
+	}
+	detail := mapDaemonSetDetail(*item)
+	detail.Pods = pods
+	detail.RelatedResources = relatedResources
+	return detail, nil
 }
 
 func (c *Client) GetDaemonSetYAML(ctx context.Context, namespace, name string) (domainresource.ResourceYAMLView, error) {
@@ -515,7 +522,14 @@ func (c *Client) GetJobDetail(ctx context.Context, namespace, name string) (doma
 	if err != nil {
 		return domainresource.JobDetailView{}, err
 	}
-	return mapJobDetail(*item), nil
+	pods, relatedResources, err := c.loadWorkloadDetailRelations(queryCtx, namespace, item.Spec.Selector, item.OwnerReferences, item.Spec.Template, item.UID)
+	if err != nil {
+		return domainresource.JobDetailView{}, err
+	}
+	detail := mapJobDetail(*item)
+	detail.Pods = pods
+	detail.RelatedResources = relatedResources
+	return detail, nil
 }
 
 func (c *Client) GetJobYAML(ctx context.Context, namespace, name string) (domainresource.ResourceYAMLView, error) {
@@ -563,45 +577,15 @@ func (c *Client) ListReplicaSets(ctx context.Context, namespace string) ([]domai
 }
 
 func (c *Client) ListConfigMaps(ctx context.Context, namespace string) ([]domainresource.ConfigMapView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := c.typed.CoreV1().ConfigMaps(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.ConfigMapView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapConfigMap(item))
-	}
-	return views, nil
+	return c.listConfigMapSummaries(ctx, namespace)
 }
 
 func (c *Client) ListSecrets(ctx context.Context, namespace string) ([]domainresource.SecretView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := c.typed.CoreV1().Secrets(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.SecretView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapSecret(item))
-	}
-	return views, nil
+	return c.listSecretSummaries(ctx, namespace)
 }
 
 func (c *Client) ListServiceAccounts(ctx context.Context, namespace string) ([]domainresource.ServiceAccountView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := c.typed.CoreV1().ServiceAccounts(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.ServiceAccountView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapServiceAccount(item))
-	}
-	return views, nil
+	return c.listServiceAccountSummaries(ctx, namespace)
 }
 
 func (c *Client) GetServiceAccountDetail(ctx context.Context, namespace, name string) (domainresource.ServiceAccountDetailView, error) {
@@ -615,17 +599,7 @@ func (c *Client) GetServiceAccountDetail(ctx context.Context, namespace, name st
 }
 
 func (c *Client) ListRoles(ctx context.Context, namespace string) ([]domainresource.RoleView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := c.typed.RbacV1().Roles(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.RoleView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapRole(item))
-	}
-	return views, nil
+	return c.listRoleSummaries(ctx, namespace)
 }
 
 func (c *Client) GetRoleDetail(ctx context.Context, namespace, name string) (domainresource.RoleDetailView, error) {
@@ -639,17 +613,34 @@ func (c *Client) GetRoleDetail(ctx context.Context, namespace, name string) (dom
 }
 
 func (c *Client) ListRoleBindings(ctx context.Context, namespace string) ([]domainresource.RoleBindingView, error) {
+	return c.listRoleBindingSummaries(ctx, namespace)
+}
+
+func (c *Client) ListRoleBindingsForSubject(ctx context.Context, namespace, kind, name, subjectNamespace string) ([]domainresource.RoleBindingView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.RbacV1().RoleBindings(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	views := []domainresource.RoleBindingView{}
+	continueToken := ""
+	for {
+		items, err := c.typed.RbacV1().RoleBindings(namespace).List(queryCtx, metav1.ListOptions{
+			Limit: int64(agentTablePageSize), Continue: continueToken,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items.Items {
+			if bindingHasSubject(item.Subjects, kind, name, subjectNamespace, item.Namespace) {
+				views = append(views, mapRoleBinding(item))
+			}
+		}
+		if items.Continue == "" {
+			return views, nil
+		}
+		if items.Continue == continueToken {
+			return nil, fmt.Errorf("rolebinding listing returned a repeated continue token")
+		}
+		continueToken = items.Continue
 	}
-	views := make([]domainresource.RoleBindingView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapRoleBinding(item))
-	}
-	return views, nil
 }
 
 func (c *Client) GetRoleBindingDetail(ctx context.Context, namespace, name string) (domainresource.RoleBindingDetailView, error) {
@@ -676,6 +667,16 @@ func (c *Client) ListHorizontalPodAutoscalers(ctx context.Context, namespace str
 	return views, nil
 }
 
+func (c *Client) GetHorizontalPodAutoscalerDetail(ctx context.Context, namespace, name string) (domainresource.HorizontalPodAutoscalerDetailView, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	item, err := c.typed.AutoscalingV2().HorizontalPodAutoscalers(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.HorizontalPodAutoscalerDetailView{}, err
+	}
+	return mapHorizontalPodAutoscalerDetail(*item), nil
+}
+
 func (c *Client) ListPodDisruptionBudgets(ctx context.Context, namespace string) ([]domainresource.PodDisruptionBudgetView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -690,6 +691,28 @@ func (c *Client) ListPodDisruptionBudgets(ctx context.Context, namespace string)
 	return views, nil
 }
 
+func (c *Client) GetPodDisruptionBudgetDetail(ctx context.Context, namespace, name string) (domainresource.PodDisruptionBudgetDetailView, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	item, err := c.typed.PolicyV1().PodDisruptionBudgets(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.PodDisruptionBudgetDetailView{}, err
+	}
+	selector, err := metav1.LabelSelectorAsSelector(item.Spec.Selector)
+	if err != nil {
+		return domainresource.PodDisruptionBudgetDetailView{}, err
+	}
+	podList, err := c.typed.CoreV1().Pods(namespace).List(queryCtx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return domainresource.PodDisruptionBudgetDetailView{}, err
+	}
+	workload, err := c.commonPodWorkload(queryCtx, namespace, podList.Items)
+	if err != nil {
+		return domainresource.PodDisruptionBudgetDetailView{}, err
+	}
+	return mapPodDisruptionBudgetDetail(*item, selector.String(), podList.Items, workload), nil
+}
+
 func (c *Client) GetCronJobDetail(ctx context.Context, namespace, name string) (domainresource.CronJobDetailView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -697,7 +720,18 @@ func (c *Client) GetCronJobDetail(ctx context.Context, namespace, name string) (
 	if err != nil {
 		return domainresource.CronJobDetailView{}, err
 	}
-	return mapCronJobDetail(*item), nil
+	jobs, err := c.listOwnedJobs(queryCtx, namespace, item.UID)
+	if err != nil {
+		return domainresource.CronJobDetailView{}, err
+	}
+	relatedResources, err := c.listWorkloadRelations(queryCtx, namespace, item.OwnerReferences, item.Spec.JobTemplate.Spec.Template)
+	if err != nil {
+		return domainresource.CronJobDetailView{}, err
+	}
+	detail := mapCronJobDetail(*item)
+	detail.Jobs = jobs
+	detail.RelatedResources = relatedResources
+	return detail, nil
 }
 
 func (c *Client) GetCronJobYAML(ctx context.Context, namespace, name string) (domainresource.ResourceYAMLView, error) {
@@ -917,41 +951,11 @@ func resourceGVRForKind(kind string) (schema.GroupVersionResource, bool, string,
 }
 
 func (c *Client) ListCRDs(ctx context.Context) ([]domainresource.CRDView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	gvr := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
-	items, err := c.dynamic.Resource(gvr).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.CRDView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapCRD(item))
-	}
-	return views, nil
+	return c.listCRDSummaries(ctx)
 }
 
 func (c *Client) ListHelmReleases(ctx context.Context, namespace string) ([]domainresource.HelmReleaseView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := c.typed.CoreV1().Secrets(namespace).List(queryCtx, metav1.ListOptions{LabelSelector: "owner=helm"})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.HelmReleaseView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapHelmRelease(item.Name, item.Namespace, item.Labels, item.CreationTimestamp.Time, "secret"))
-	}
-	sort.SliceStable(views, func(i, j int) bool {
-		if views[i].Namespace != views[j].Namespace {
-			return views[i].Namespace < views[j].Namespace
-		}
-		if views[i].Name != views[j].Name {
-			return views[i].Name < views[j].Name
-		}
-		return views[i].Revision > views[j].Revision
-	})
-	return dedupeHelmReleases(views), nil
+	return c.listHelmReleaseSummaries(ctx, namespace)
 }
 
 func (c *Client) GetHelmReleaseDetail(ctx context.Context, namespace, name string) (domainresource.HelmReleaseDetailView, error) {
@@ -1019,6 +1023,35 @@ func (c *Client) ListServices(ctx context.Context, namespace string) ([]domainre
 	return views, nil
 }
 
+func (c *Client) GetServiceDetail(ctx context.Context, namespace, name string) (domainresource.ServiceDetailView, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	service, err := c.typed.CoreV1().Services(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.ServiceDetailView{}, err
+	}
+	endpointSlices, err := c.typed.DiscoveryV1().EndpointSlices(namespace).List(queryCtx, metav1.ListOptions{
+		LabelSelector: labels.Set{discoveryv1.LabelServiceName: name}.AsSelector().String(),
+	})
+	if err != nil {
+		endpointSlices = &discoveryv1.EndpointSliceList{}
+	}
+	backendPods := []domainresource.PodView{}
+	if len(service.Spec.Selector) > 0 {
+		pods, listErr := c.typed.CoreV1().Pods(namespace).List(queryCtx, metav1.ListOptions{
+			LabelSelector: labels.Set(service.Spec.Selector).AsSelector().String(),
+		})
+		if listErr != nil {
+			backendPods = nil
+		} else {
+			for _, pod := range pods.Items {
+				backendPods = append(backendPods, mapPod(pod))
+			}
+		}
+	}
+	return buildServiceDetail(*service, endpointSlices.Items, backendPods), nil
+}
+
 func (c *Client) ListIngresses(ctx context.Context, namespace string) ([]domainresource.IngressView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -1031,6 +1064,42 @@ func (c *Client) ListIngresses(ctx context.Context, namespace string) ([]domainr
 		views = append(views, mapIngress(item))
 	}
 	return views, nil
+}
+
+func (c *Client) GetIngressDetail(ctx context.Context, namespace, name string) (domainresource.IngressDetailView, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ingress, err := c.typed.NetworkingV1().Ingresses(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.IngressDetailView{}, err
+	}
+	backends := make([]domainresource.IngressBackendView, 0)
+	for _, serviceName := range extractIngressBackendServices(*ingress) {
+		service, getErr := c.typed.CoreV1().Services(namespace).Get(queryCtx, serviceName, metav1.GetOptions{})
+		if getErr != nil {
+			backends = append(backends, domainresource.IngressBackendView{ServiceName: serviceName})
+			continue
+		}
+		slices, listErr := c.typed.DiscoveryV1().EndpointSlices(namespace).List(queryCtx, metav1.ListOptions{LabelSelector: labels.Set{discoveryv1.LabelServiceName: serviceName}.AsSelector().String()})
+		if listErr != nil {
+			slices = &discoveryv1.EndpointSliceList{}
+		}
+		pods := []corev1.Pod{}
+		if len(service.Spec.Selector) > 0 {
+			items, podErr := c.typed.CoreV1().Pods(namespace).List(queryCtx, metav1.ListOptions{LabelSelector: labels.Set(service.Spec.Selector).AsSelector().String()})
+			if podErr != nil {
+				pods = nil
+			} else {
+				pods = items.Items
+			}
+		}
+		backends = append(backends, domainresource.IngressBackendView{
+			ServiceName: serviceName,
+			Endpoints:   mapEndpointSliceEndpoints(slices.Items),
+			Pods:        buildNetworkRelatedPods(queryCtx, c.typed, pods),
+		})
+	}
+	return buildIngressDetail(*ingress, backends), nil
 }
 
 func (c *Client) ListEndpointSlices(ctx context.Context, namespace string) ([]domainresource.EndpointSliceView, error) {
@@ -1047,6 +1116,16 @@ func (c *Client) ListEndpointSlices(ctx context.Context, namespace string) ([]do
 	return views, nil
 }
 
+func (c *Client) GetEndpointSliceDetail(ctx context.Context, namespace, name string) (domainresource.EndpointSliceDetailView, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	item, err := c.typed.DiscoveryV1().EndpointSlices(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.EndpointSliceDetailView{}, err
+	}
+	return buildEndpointSliceDetail(*item), nil
+}
+
 func (c *Client) ListNetworkPolicies(ctx context.Context, namespace string) ([]domainresource.NetworkPolicyView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -1059,6 +1138,28 @@ func (c *Client) ListNetworkPolicies(ctx context.Context, namespace string) ([]d
 		views = append(views, mapNetworkPolicy(item))
 	}
 	return views, nil
+}
+
+func (c *Client) GetNetworkPolicyDetail(ctx context.Context, namespace, name string) (domainresource.NetworkPolicyDetailView, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	item, err := c.typed.NetworkingV1().NetworkPolicies(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.NetworkPolicyDetailView{}, err
+	}
+	selector, err := metav1.LabelSelectorAsSelector(&item.Spec.PodSelector)
+	if err != nil {
+		return domainresource.NetworkPolicyDetailView{}, err
+	}
+	pods, err := c.typed.CoreV1().Pods(namespace).List(queryCtx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return domainresource.NetworkPolicyDetailView{}, err
+	}
+	views := make([]domainresource.PodView, 0, len(pods.Items))
+	for _, pod := range pods.Items {
+		views = append(views, mapPod(pod))
+	}
+	return buildNetworkPolicyDetail(*item, views), nil
 }
 
 func (c *Client) ListPersistentVolumeClaims(ctx context.Context, namespace string) ([]domainresource.PersistentVolumeClaimView, error) {
@@ -1090,17 +1191,7 @@ func (c *Client) ListPersistentVolumes(ctx context.Context) ([]domainresource.Pe
 }
 
 func (c *Client) ListStorageClasses(ctx context.Context) ([]domainresource.StorageClassView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := c.typed.StorageV1().StorageClasses().List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.StorageClassView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapStorageClass(item))
-	}
-	return views, nil
+	return c.listStorageClassSummaries(ctx)
 }
 
 func (c *Client) ListIngressClasses(ctx context.Context) ([]domainresource.IngressClassView, error) {
@@ -1146,17 +1237,7 @@ func (c *Client) ListRuntimeClasses(ctx context.Context) ([]domainresource.Runti
 }
 
 func (c *Client) ListClusterRoles(ctx context.Context) ([]domainresource.ClusterRoleView, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	items, err := c.typed.RbacV1().ClusterRoles().List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	views := make([]domainresource.ClusterRoleView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapClusterRole(item))
-	}
-	return views, nil
+	return c.listClusterRoleSummaries(ctx)
 }
 
 func (c *Client) GetClusterRoleDetail(ctx context.Context, name string) (domainresource.ClusterRoleDetailView, error) {
@@ -1170,17 +1251,47 @@ func (c *Client) GetClusterRoleDetail(ctx context.Context, name string) (domainr
 }
 
 func (c *Client) ListClusterRoleBindings(ctx context.Context) ([]domainresource.ClusterRoleBindingView, error) {
+	return c.listClusterRoleBindingSummaries(ctx)
+}
+
+func (c *Client) ListClusterRoleBindingsForSubject(ctx context.Context, kind, name, namespace string) ([]domainresource.ClusterRoleBindingView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.RbacV1().ClusterRoleBindings().List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	views := []domainresource.ClusterRoleBindingView{}
+	continueToken := ""
+	for {
+		items, err := c.typed.RbacV1().ClusterRoleBindings().List(queryCtx, metav1.ListOptions{
+			Limit: int64(agentTablePageSize), Continue: continueToken,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items.Items {
+			if bindingHasSubject(item.Subjects, kind, name, namespace, "") {
+				views = append(views, mapClusterRoleBinding(item))
+			}
+		}
+		if items.Continue == "" {
+			return views, nil
+		}
+		if items.Continue == continueToken {
+			return nil, fmt.Errorf("clusterrolebinding listing returned a repeated continue token")
+		}
+		continueToken = items.Continue
 	}
-	views := make([]domainresource.ClusterRoleBindingView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapClusterRoleBinding(item))
+}
+
+func bindingHasSubject(subjects []rbacv1.Subject, kind, name, namespace, defaultNamespace string) bool {
+	for _, subject := range subjects {
+		subjectNamespace := subject.Namespace
+		if subjectNamespace == "" {
+			subjectNamespace = defaultNamespace
+		}
+		if subject.Kind == kind && subject.Name == name && subjectNamespace == namespace {
+			return true
+		}
 	}
-	return views, nil
+	return false
 }
 
 func (c *Client) GetClusterRoleBindingDetail(ctx context.Context, name string) (domainresource.ClusterRoleBindingDetailView, error) {
@@ -1194,31 +1305,41 @@ func (c *Client) GetClusterRoleBindingDetail(ctx context.Context, name string) (
 }
 
 func (c *Client) ListMutatingWebhookConfigurations(ctx context.Context) ([]domainresource.MutatingWebhookConfigurationView, error) {
+	return c.listWebhookSummaries(ctx, "mutatingwebhookconfigurations")
+}
+
+func (c *Client) GetMutatingWebhookConfigurationDetail(ctx context.Context, name string) (domainresource.AdmissionWebhookConfigurationDetailView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.AdmissionregistrationV1().MutatingWebhookConfigurations().List(queryCtx, metav1.ListOptions{})
+	item, err := c.typed.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.AdmissionWebhookConfigurationDetailView{}, err
+	}
+	return mapMutatingWebhookConfigurationDetail(*item), nil
+}
+
+func (c *Client) ListValidatingWebhookConfigurations(ctx context.Context) ([]domainresource.ValidatingWebhookConfigurationView, error) {
+	items, err := c.listWebhookSummaries(ctx, "validatingwebhookconfigurations")
 	if err != nil {
 		return nil, err
 	}
-	views := make([]domainresource.MutatingWebhookConfigurationView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapMutatingWebhookConfiguration(item))
+	views := make([]domainresource.ValidatingWebhookConfigurationView, 0, len(items))
+	for _, item := range items {
+		views = append(views, domainresource.ValidatingWebhookConfigurationView{
+			Name: item.Name, Webhooks: item.Webhooks, AgeSeconds: item.AgeSeconds,
+		})
 	}
 	return views, nil
 }
 
-func (c *Client) ListValidatingWebhookConfigurations(ctx context.Context) ([]domainresource.ValidatingWebhookConfigurationView, error) {
+func (c *Client) GetValidatingWebhookConfigurationDetail(ctx context.Context, name string) (domainresource.AdmissionWebhookConfigurationDetailView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.AdmissionregistrationV1().ValidatingWebhookConfigurations().List(queryCtx, metav1.ListOptions{})
+	item, err := c.typed.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(queryCtx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, err
+		return domainresource.AdmissionWebhookConfigurationDetailView{}, err
 	}
-	views := make([]domainresource.ValidatingWebhookConfigurationView, 0, len(items.Items))
-	for _, item := range items.Items {
-		views = append(views, mapValidatingWebhookConfiguration(item))
-	}
-	return views, nil
+	return mapValidatingWebhookConfigurationDetail(*item), nil
 }
 
 func (c *Client) ListResourceQuotas(ctx context.Context, namespace string) ([]domainresource.ResourceQuotaView, error) {
@@ -1235,6 +1356,16 @@ func (c *Client) ListResourceQuotas(ctx context.Context, namespace string) ([]do
 	return views, nil
 }
 
+func (c *Client) GetResourceQuotaDetail(ctx context.Context, namespace, name string) (domainresource.ResourceQuotaDetailView, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	item, err := c.typed.CoreV1().ResourceQuotas(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.ResourceQuotaDetailView{}, err
+	}
+	return mapResourceQuotaDetail(*item), nil
+}
+
 func (c *Client) ListLimitRanges(ctx context.Context, namespace string) ([]domainresource.LimitRangeView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -1247,6 +1378,16 @@ func (c *Client) ListLimitRanges(ctx context.Context, namespace string) ([]domai
 		views = append(views, mapLimitRange(item))
 	}
 	return views, nil
+}
+
+func (c *Client) GetLimitRangeDetail(ctx context.Context, namespace, name string) (domainresource.LimitRangeDetailView, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	item, err := c.typed.CoreV1().LimitRanges(namespace).Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.LimitRangeDetailView{}, err
+	}
+	return mapLimitRangeDetail(*item), nil
 }
 
 func (c *Client) ListLeases(ctx context.Context, namespace string) ([]domainresource.LeaseView, error) {
@@ -1543,50 +1684,65 @@ type podRelatedResourceAccumulator struct {
 }
 
 func buildDetailedPodContainers(item corev1.Pod) []domainresource.WorkloadContainerView {
-	containers := make([]domainresource.WorkloadContainerView, 0, len(item.Spec.Containers))
-	statusMap := make(map[string]corev1.ContainerStatus, len(item.Status.ContainerStatuses))
-	for _, status := range item.Status.ContainerStatuses {
-		statusMap[status.Name] = status
+	build := func(specs []corev1.Container, statuses []corev1.ContainerStatus, role string) []domainresource.WorkloadContainerView {
+		containers := make([]domainresource.WorkloadContainerView, 0, len(specs))
+		statusMap := make(map[string]corev1.ContainerStatus, len(statuses))
+		for _, status := range statuses {
+			statusMap[status.Name] = status
+		}
+		for index, container := range specs {
+			containerStatus := statusMap[container.Name]
+			state := containerState(containerStatus.State)
+			lastState := containerState(containerStatus.LastTerminationState)
+			startedAt := ""
+			reason := ""
+			message := ""
+			if containerStatus.State.Running != nil && !containerStatus.State.Running.StartedAt.IsZero() {
+				startedAt = containerStatus.State.Running.StartedAt.Time.UTC().Format(time.RFC3339)
+			}
+			if containerStatus.State.Waiting != nil {
+				reason = containerStatus.State.Waiting.Reason
+				message = containerStatus.State.Waiting.Message
+			}
+			if containerStatus.State.Terminated != nil {
+				if reason == "" {
+					reason = containerStatus.State.Terminated.Reason
+				}
+				if message == "" {
+					message = containerStatus.State.Terminated.Message
+				}
+				if startedAt == "" && !containerStatus.State.Terminated.StartedAt.IsZero() {
+					startedAt = containerStatus.State.Terminated.StartedAt.Time.UTC().Format(time.RFC3339)
+				}
+			}
+			containerRole := role
+			if role == "init" && container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+				containerRole = "sidecar"
+			}
+			if containerRole == "" {
+				containerRole = "sidecar"
+				if index == 0 {
+					containerRole = "main"
+				}
+			}
+			containers = append(containers, domainresource.WorkloadContainerView{
+				Name:         container.Name,
+				Image:        container.Image,
+				Role:         containerRole,
+				Ready:        containerStatus.Ready,
+				RestartCount: containerStatus.RestartCount,
+				State:        state,
+				LastState:    lastState,
+				ContainerID:  strings.TrimSpace(containerStatus.ContainerID),
+				StartedAt:    startedAt,
+				Reason:       strings.TrimSpace(reason),
+				Message:      strings.TrimSpace(message),
+			})
+		}
+		return containers
 	}
-	for _, container := range item.Spec.Containers {
-		containerStatus := statusMap[container.Name]
-		state := containerState(containerStatus.State)
-		lastState := containerState(containerStatus.LastTerminationState)
-		startedAt := ""
-		reason := ""
-		message := ""
-		if containerStatus.State.Running != nil && !containerStatus.State.Running.StartedAt.IsZero() {
-			startedAt = containerStatus.State.Running.StartedAt.Time.UTC().Format(time.RFC3339)
-		}
-		if containerStatus.State.Waiting != nil {
-			reason = containerStatus.State.Waiting.Reason
-			message = containerStatus.State.Waiting.Message
-		}
-		if containerStatus.State.Terminated != nil {
-			if reason == "" {
-				reason = containerStatus.State.Terminated.Reason
-			}
-			if message == "" {
-				message = containerStatus.State.Terminated.Message
-			}
-			if startedAt == "" && !containerStatus.State.Terminated.StartedAt.IsZero() {
-				startedAt = containerStatus.State.Terminated.StartedAt.Time.UTC().Format(time.RFC3339)
-			}
-		}
-		containers = append(containers, domainresource.WorkloadContainerView{
-			Name:         container.Name,
-			Image:        container.Image,
-			Ready:        containerStatus.Ready,
-			RestartCount: containerStatus.RestartCount,
-			State:        state,
-			LastState:    lastState,
-			ContainerID:  strings.TrimSpace(containerStatus.ContainerID),
-			StartedAt:    startedAt,
-			Reason:       strings.TrimSpace(reason),
-			Message:      strings.TrimSpace(message),
-		})
-	}
-	return containers
+	containers := build(item.Spec.InitContainers, item.Status.InitContainerStatuses, "init")
+	return append(containers, build(item.Spec.Containers, item.Status.ContainerStatuses, "")...)
 }
 
 func buildPodVolumeSourceRefs(item corev1.Pod) podVolumeSourceRefSet {
@@ -1964,23 +2120,6 @@ func mapKeysSorted(items map[string]struct{}) []string {
 	return values
 }
 
-func mapDeployment(item appsv1.Deployment) domainresource.DeploymentView {
-	desired := int32(1)
-	if item.Spec.Replicas != nil {
-		desired = *item.Spec.Replicas
-	}
-	return domainresource.DeploymentView{
-		Name:            item.Name,
-		Namespace:       item.Namespace,
-		Labels:          item.Labels,
-		DesiredReplicas: desired,
-		ReadyReplicas:   item.Status.ReadyReplicas,
-		UpdatedReplicas: item.Status.UpdatedReplicas,
-		Available:       item.Status.AvailableReplicas,
-		AgeSeconds:      secondsSince(item.CreationTimestamp.Time),
-	}
-}
-
 func mapDeploymentDetail(item appsv1.Deployment) domainresource.DeploymentDetailView {
 	desired := int32(1)
 	if item.Spec.Replicas != nil {
@@ -2095,19 +2234,6 @@ func mapStatefulSetDetail(item appsv1.StatefulSet) domainresource.StatefulSetDet
 		Labels:          item.Labels,
 		Annotations:     item.Annotations,
 		Selector:        item.Spec.Selector.MatchLabels,
-	}
-}
-
-func mapDaemonSet(item appsv1.DaemonSet) domainresource.DaemonSetView {
-	return domainresource.DaemonSetView{
-		Name:            item.Name,
-		Namespace:       item.Namespace,
-		DesiredNumber:   item.Status.DesiredNumberScheduled,
-		CurrentNumber:   item.Status.CurrentNumberScheduled,
-		ReadyNumber:     item.Status.NumberReady,
-		AvailableNumber: item.Status.NumberAvailable,
-		UpdatedNumber:   item.Status.UpdatedNumberScheduled,
-		AgeSeconds:      secondsSince(item.CreationTimestamp.Time),
 	}
 }
 
@@ -2246,39 +2372,6 @@ func mapReplicaSet(item appsv1.ReplicaSet) domainresource.ReplicaSetView {
 	}
 }
 
-func mapConfigMap(item corev1.ConfigMap) domainresource.ConfigMapView {
-	return domainresource.ConfigMapView{
-		Name:          item.Name,
-		Namespace:     item.Namespace,
-		DataEntries:   len(item.Data),
-		BinaryEntries: len(item.BinaryData),
-		Immutable:     item.Immutable != nil && *item.Immutable,
-		AgeSeconds:    secondsSince(item.CreationTimestamp.Time),
-	}
-}
-
-func mapSecret(item corev1.Secret) domainresource.SecretView {
-	return domainresource.SecretView{
-		Name:        item.Name,
-		Namespace:   item.Namespace,
-		Type:        string(item.Type),
-		DataEntries: len(item.Data),
-		Immutable:   item.Immutable != nil && *item.Immutable,
-		AgeSeconds:  secondsSince(item.CreationTimestamp.Time),
-	}
-}
-
-func mapServiceAccount(item corev1.ServiceAccount) domainresource.ServiceAccountView {
-	return domainresource.ServiceAccountView{
-		Name:             item.Name,
-		Namespace:        item.Namespace,
-		Secrets:          len(item.Secrets),
-		ImagePullSecrets: len(item.ImagePullSecrets),
-		AutomountSAToken: item.AutomountServiceAccountToken != nil && *item.AutomountServiceAccountToken,
-		AgeSeconds:       secondsSince(item.CreationTimestamp.Time),
-	}
-}
-
 func mapServiceAccountDetail(item corev1.ServiceAccount) domainresource.ServiceAccountDetailView {
 	secrets := make([]string, 0, len(item.Secrets))
 	for _, secret := range item.Secrets {
@@ -2341,15 +2434,6 @@ func summarizeRBACPolicyRules(rules []rbacv1.PolicyRule) []string {
 	return summaries
 }
 
-func mapRole(item rbacv1.Role) domainresource.RoleView {
-	return domainresource.RoleView{
-		Name:       item.Name,
-		Namespace:  item.Namespace,
-		Rules:      len(item.Rules),
-		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
-	}
-}
-
 func mapRoleDetail(item rbacv1.Role) domainresource.RoleDetailView {
 	return domainresource.RoleDetailView{
 		Name:          item.Name,
@@ -2364,19 +2448,10 @@ func mapRoleDetail(item rbacv1.Role) domainresource.RoleDetailView {
 }
 
 func mapRoleBinding(item rbacv1.RoleBinding) domainresource.RoleBindingView {
-	subjects := make([]string, 0, len(item.Subjects))
-	for _, subject := range item.Subjects {
-		if strings.TrimSpace(subject.Namespace) != "" {
-			subjects = append(subjects, fmt.Sprintf("%s:%s/%s", subject.Kind, subject.Namespace, subject.Name))
-			continue
-		}
-		subjects = append(subjects, fmt.Sprintf("%s:%s", subject.Kind, subject.Name))
-	}
 	return domainresource.RoleBindingView{
 		Name:       item.Name,
 		Namespace:  item.Namespace,
 		RoleRef:    fmt.Sprintf("%s/%s", item.RoleRef.Kind, item.RoleRef.Name),
-		Subjects:   subjects,
 		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
 	}
 }
@@ -2420,6 +2495,117 @@ func mapHorizontalPodAutoscaler(item autoscalingv2.HorizontalPodAutoscaler) doma
 	}
 }
 
+func mapHorizontalPodAutoscalerDetail(item autoscalingv2.HorizontalPodAutoscaler) domainresource.HorizontalPodAutoscalerDetailView {
+	metrics := make([]domainresource.HorizontalPodAutoscalerMetricView, 0, len(item.Spec.Metrics))
+	for index, metric := range item.Spec.Metrics {
+		current := ""
+		if index < len(item.Status.CurrentMetrics) {
+			current = horizontalPodAutoscalerMetricCurrent(item.Status.CurrentMetrics[index])
+		}
+		metrics = append(metrics, domainresource.HorizontalPodAutoscalerMetricView{
+			Type:    string(metric.Type),
+			Name:    horizontalPodAutoscalerMetricName(metric),
+			Target:  horizontalPodAutoscalerMetricTarget(metric),
+			Current: current,
+		})
+	}
+	conditions := make([]domainresource.WorkloadConditionView, 0, len(item.Status.Conditions))
+	for _, condition := range item.Status.Conditions {
+		conditions = append(conditions, domainresource.WorkloadConditionView{
+			Type:               string(condition.Type),
+			Status:             string(condition.Status),
+			Reason:             condition.Reason,
+			Message:            condition.Message,
+			LastTransitionTime: condition.LastTransitionTime.Time.Format(time.RFC3339),
+		})
+	}
+	return domainresource.HorizontalPodAutoscalerDetailView{
+		HorizontalPodAutoscalerView: mapHorizontalPodAutoscaler(item),
+		Labels:                      item.Labels,
+		Annotations:                 item.Annotations,
+		CreatedAt:                   item.CreationTimestamp.Time.Format(time.RFC3339),
+		Metrics:                     metrics,
+		Conditions:                  conditions,
+	}
+}
+
+func horizontalPodAutoscalerMetricName(metric autoscalingv2.MetricSpec) string {
+	switch metric.Type {
+	case autoscalingv2.ResourceMetricSourceType:
+		return string(metric.Resource.Name)
+	case autoscalingv2.ContainerResourceMetricSourceType:
+		return metric.ContainerResource.Container + "/" + string(metric.ContainerResource.Name)
+	case autoscalingv2.PodsMetricSourceType:
+		return metric.Pods.Metric.Name
+	case autoscalingv2.ObjectMetricSourceType:
+		return metric.Object.Metric.Name
+	case autoscalingv2.ExternalMetricSourceType:
+		return metric.External.Metric.Name
+	default:
+		return ""
+	}
+}
+
+func horizontalPodAutoscalerMetricTarget(metric autoscalingv2.MetricSpec) string {
+	switch metric.Type {
+	case autoscalingv2.ResourceMetricSourceType:
+		return formatMetricTarget(metric.Resource.Target)
+	case autoscalingv2.ContainerResourceMetricSourceType:
+		return formatMetricTarget(metric.ContainerResource.Target)
+	case autoscalingv2.PodsMetricSourceType:
+		return formatMetricTarget(metric.Pods.Target)
+	case autoscalingv2.ObjectMetricSourceType:
+		return formatMetricTarget(metric.Object.Target)
+	case autoscalingv2.ExternalMetricSourceType:
+		return formatMetricTarget(metric.External.Target)
+	default:
+		return ""
+	}
+}
+
+func formatMetricTarget(target autoscalingv2.MetricTarget) string {
+	if target.AverageUtilization != nil {
+		return strconv.FormatInt(int64(*target.AverageUtilization), 10) + "%"
+	}
+	if target.AverageValue != nil {
+		return target.AverageValue.String()
+	}
+	if target.Value != nil {
+		return target.Value.String()
+	}
+	return ""
+}
+
+func horizontalPodAutoscalerMetricCurrent(metric autoscalingv2.MetricStatus) string {
+	switch metric.Type {
+	case autoscalingv2.ResourceMetricSourceType:
+		return formatMetricValue(metric.Resource.Current)
+	case autoscalingv2.ContainerResourceMetricSourceType:
+		return formatMetricValue(metric.ContainerResource.Current)
+	case autoscalingv2.PodsMetricSourceType:
+		return formatMetricValue(metric.Pods.Current)
+	case autoscalingv2.ObjectMetricSourceType:
+		return formatMetricValue(metric.Object.Current)
+	case autoscalingv2.ExternalMetricSourceType:
+		return formatMetricValue(metric.External.Current)
+	default:
+		return ""
+	}
+}
+
+func formatMetricValue(value autoscalingv2.MetricValueStatus) string {
+	if value.AverageUtilization != nil {
+		return strconv.FormatInt(int64(*value.AverageUtilization), 10) + "%"
+	}
+	if value.AverageValue != nil {
+		return value.AverageValue.String()
+	}
+	if value.Value != nil {
+		return value.Value.String()
+	}
+	return ""
+}
+
 func mapPodDisruptionBudget(item policyv1.PodDisruptionBudget) domainresource.PodDisruptionBudgetView {
 	minAvailable := ""
 	if item.Spec.MinAvailable != nil {
@@ -2441,32 +2627,107 @@ func mapPodDisruptionBudget(item policyv1.PodDisruptionBudget) domainresource.Po
 	}
 }
 
-func mapCRD(item unstructured.Unstructured) domainresource.CRDView {
-	group, _, _ := unstructured.NestedString(item.Object, "spec", "group")
-	scope, _, _ := unstructured.NestedString(item.Object, "spec", "scope")
-	kind, _, _ := unstructured.NestedString(item.Object, "spec", "names", "kind")
-	plural, _, _ := unstructured.NestedString(item.Object, "spec", "names", "plural")
-	versionItems, _, _ := unstructured.NestedSlice(item.Object, "spec", "versions")
-	versions := make([]string, 0, len(versionItems))
-	for _, raw := range versionItems {
-		value, ok := raw.(map[string]any)
-		if !ok {
-			continue
+func mapPodDisruptionBudgetDetail(
+	item policyv1.PodDisruptionBudget,
+	selector string,
+	pods []corev1.Pod,
+	workload *domainresource.PodRelatedResourceView,
+) domainresource.PodDisruptionBudgetDetailView {
+	podViews := make([]domainresource.PodView, 0, len(pods))
+	for _, pod := range pods {
+		podViews = append(podViews, mapPod(pod))
+	}
+	sort.SliceStable(podViews, func(i, j int) bool { return podViews[i].Name < podViews[j].Name })
+	conditions := make([]domainresource.WorkloadConditionView, 0, len(item.Status.Conditions))
+	for _, condition := range item.Status.Conditions {
+		conditions = append(conditions, domainresource.WorkloadConditionView{
+			Type:               string(condition.Type),
+			Status:             string(condition.Status),
+			Reason:             condition.Reason,
+			Message:            condition.Message,
+			LastTransitionTime: condition.LastTransitionTime.Time.Format(time.RFC3339),
+		})
+	}
+	return domainresource.PodDisruptionBudgetDetailView{
+		PodDisruptionBudgetView: mapPodDisruptionBudget(item),
+		Labels:                  item.Labels,
+		Annotations:             item.Annotations,
+		CreatedAt:               item.CreationTimestamp.Time.Format(time.RFC3339),
+		Selector:                selector,
+		Pods:                    podViews,
+		Workload:                workload,
+		Conditions:              conditions,
+	}
+}
+
+func (c *Client) commonPodWorkload(
+	ctx context.Context,
+	namespace string,
+	pods []corev1.Pod,
+) (*domainresource.PodRelatedResourceView, error) {
+	if len(pods) == 0 {
+		return nil, nil
+	}
+	resolvedOwners := map[string]metav1.OwnerReference{}
+	common, ok, err := c.resolvePodWorkloadOwner(ctx, namespace, pods[0], resolvedOwners)
+	if err != nil || !ok {
+		return nil, err
+	}
+	for _, pod := range pods[1:] {
+		owner, ownerOK, ownerErr := c.resolvePodWorkloadOwner(ctx, namespace, pod, resolvedOwners)
+		if ownerErr != nil {
+			return nil, ownerErr
 		}
-		name, _ := value["name"].(string)
-		if strings.TrimSpace(name) != "" {
-			versions = append(versions, name)
+		if !ownerOK || !sameOwnerReference(common, owner) {
+			return nil, nil
 		}
 	}
-	return domainresource.CRDView{
-		Name:       item.GetName(),
-		Group:      group,
-		Scope:      scope,
-		Kind:       kind,
-		Plural:     plural,
-		Versions:   versions,
-		AgeSeconds: secondsSince(item.GetCreationTimestamp().Time),
+	return &domainresource.PodRelatedResourceView{
+		Kind:      common.Kind,
+		Name:      common.Name,
+		Namespace: namespace,
+		Relations: []string{"owner"},
+	}, nil
+}
+
+func (c *Client) resolvePodWorkloadOwner(
+	ctx context.Context,
+	namespace string,
+	pod corev1.Pod,
+	resolvedOwners map[string]metav1.OwnerReference,
+) (metav1.OwnerReference, bool, error) {
+	owner := metav1.GetControllerOf(&pod)
+	if owner == nil {
+		return metav1.OwnerReference{}, false, nil
 	}
+	if owner.Kind != "ReplicaSet" {
+		return *owner, true, nil
+	}
+	key := owner.APIVersion + "/" + owner.Kind + "/" + owner.Name + "/" + string(owner.UID)
+	if resolved, ok := resolvedOwners[key]; ok {
+		return resolved, true, nil
+	}
+	replicaSet, err := c.typed.AppsV1().ReplicaSets(namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+	if err != nil {
+		resolvedOwners[key] = *owner
+		return *owner, true, nil
+	}
+	if owner.UID != "" && replicaSet.UID != owner.UID {
+		return metav1.OwnerReference{}, false, nil
+	}
+	if workload := metav1.GetControllerOf(replicaSet); workload != nil {
+		resolvedOwners[key] = *workload
+		return *workload, true, nil
+	}
+	resolvedOwners[key] = *owner
+	return *owner, true, nil
+}
+
+func sameOwnerReference(left, right metav1.OwnerReference) bool {
+	if left.APIVersion != right.APIVersion || left.Kind != right.Kind || left.Name != right.Name {
+		return false
+	}
+	return left.UID == right.UID
 }
 
 func mapHelmRelease(name, namespace string, labels map[string]string, createdAt time.Time, storageDriver string) domainresource.HelmReleaseView {
@@ -2720,6 +2981,161 @@ func mapService(item corev1.Service) domainresource.ServiceView {
 	}
 }
 
+func buildServiceDetail(item corev1.Service, slices []discoveryv1.EndpointSlice, backendPods []domainresource.PodView) domainresource.ServiceDetailView {
+	summary := mapService(item)
+	endpoints := mapEndpointSliceEndpoints(slices)
+	return domainresource.ServiceDetailView{
+		Name: summary.Name, Namespace: summary.Namespace, Type: summary.Type, ClusterIP: summary.ClusterIP,
+		Ports: summary.Ports, Selector: summary.Selector, Labels: item.Labels, Annotations: item.Annotations,
+		Endpoints: endpoints, BackendPods: backendPods, AgeSeconds: summary.AgeSeconds,
+	}
+}
+
+func mapEndpointSliceEndpoints(slices []discoveryv1.EndpointSlice) []domainresource.ServiceEndpointView {
+	endpoints := make([]domainresource.ServiceEndpointView, 0)
+	for _, slice := range slices {
+		for _, endpoint := range slice.Endpoints {
+			targetRef := ""
+			if endpoint.TargetRef != nil {
+				targetRef = strings.Trim(strings.Join([]string{endpoint.TargetRef.Kind, endpoint.TargetRef.Name}, "/"), "/")
+			}
+			for _, address := range endpoint.Addresses {
+				view := domainresource.ServiceEndpointView{
+					Address: address, Ready: endpoint.Conditions.Ready, Serving: endpoint.Conditions.Serving,
+					Terminating: endpoint.Conditions.Terminating, TargetRef: targetRef,
+				}
+				if endpoint.NodeName != nil {
+					view.NodeName = *endpoint.NodeName
+				}
+				if endpoint.Zone != nil {
+					view.Zone = *endpoint.Zone
+				}
+				endpoints = append(endpoints, view)
+			}
+		}
+	}
+	return endpoints
+}
+
+func buildIngressDetail(item networkingv1.Ingress, backends []domainresource.IngressBackendView) domainresource.IngressDetailView {
+	summary := mapIngress(item)
+	tlsHosts := make([]string, 0)
+	for _, tls := range item.Spec.TLS {
+		for _, host := range tls.Hosts {
+			tlsHosts = append(tlsHosts, host)
+		}
+	}
+	routes := make([]domainresource.IngressRouteView, 0)
+	addRoute := func(host, path, pathType string, backend networkingv1.IngressBackend) {
+		if backend.Service == nil {
+			return
+		}
+		routes = append(routes, domainresource.IngressRouteView{
+			Host: host, Path: path, PathType: pathType, TLS: ingressHostUsesTLS(host, tlsHosts),
+			ServiceName: backend.Service.Name, ServicePort: ingressServicePort(backend.Service.Port),
+		})
+	}
+	if item.Spec.DefaultBackend != nil {
+		addRoute("", "/", "Default", *item.Spec.DefaultBackend)
+	}
+	for _, rule := range item.Spec.Rules {
+		if rule.HTTP == nil {
+			continue
+		}
+		for _, path := range rule.HTTP.Paths {
+			pathType := ""
+			if path.PathType != nil {
+				pathType = string(*path.PathType)
+			}
+			addRoute(rule.Host, path.Path, pathType, path.Backend)
+		}
+	}
+	return domainresource.IngressDetailView{
+		Name: summary.Name, Namespace: summary.Namespace, ClassName: summary.ClassName, Address: summary.Address,
+		Labels: item.Labels, Annotations: item.Annotations, Routes: routes, Backends: backends, AgeSeconds: summary.AgeSeconds,
+	}
+}
+
+func ingressHostUsesTLS(host string, tlsHosts []string) bool {
+	for _, tlsHost := range tlsHosts {
+		if tlsHost == host {
+			return true
+		}
+		if strings.HasPrefix(tlsHost, "*.") {
+			suffix := strings.TrimPrefix(tlsHost, "*.")
+			prefix := strings.TrimSuffix(host, "."+suffix)
+			if prefix != host && prefix != "" && !strings.Contains(prefix, ".") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func ingressServicePort(port networkingv1.ServiceBackendPort) string {
+	if port.Name != "" {
+		return port.Name
+	}
+	if port.Number != 0 {
+		return strconv.FormatInt(int64(port.Number), 10)
+	}
+	return ""
+}
+
+func podOwnerName(owners []metav1.OwnerReference, kind string) string {
+	for _, owner := range owners {
+		if owner.Kind == kind {
+			return owner.Name
+		}
+	}
+	return ""
+}
+
+func buildNetworkRelatedPods(ctx context.Context, client kubernetes.Interface, pods []corev1.Pod) []domainresource.NetworkRelatedPodView {
+	replicaSetDeployments := make(map[string]string)
+	jobCronJobs := make(map[string]string)
+	for _, pod := range pods {
+		for _, owner := range pod.OwnerReferences {
+			switch owner.Kind {
+			case "ReplicaSet":
+				if _, ok := replicaSetDeployments[owner.Name]; !ok {
+					replicaSetDeployments[owner.Name] = ""
+					if item, err := client.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{}); err == nil {
+						replicaSetDeployments[owner.Name] = podOwnerName(item.OwnerReferences, "Deployment")
+					}
+				}
+			case "Job":
+				if _, ok := jobCronJobs[owner.Name]; !ok {
+					jobCronJobs[owner.Name] = ""
+					if item, err := client.BatchV1().Jobs(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{}); err == nil {
+						jobCronJobs[owner.Name] = podOwnerName(item.OwnerReferences, "CronJob")
+					}
+				}
+			}
+		}
+	}
+	views := make([]domainresource.NetworkRelatedPodView, 0, len(pods))
+	for _, pod := range pods {
+		workloads := make([]domainresource.PodRelatedResourceView, 0)
+		for _, owner := range pod.OwnerReferences {
+			switch owner.Kind {
+			case "ReplicaSet":
+				workloads = append(workloads, domainresource.PodRelatedResourceView{Kind: owner.Kind, Name: owner.Name, Namespace: pod.Namespace})
+				if deployment := replicaSetDeployments[owner.Name]; deployment != "" {
+					workloads = append(workloads, domainresource.PodRelatedResourceView{Kind: "Deployment", Name: deployment, Namespace: pod.Namespace})
+				}
+			case "StatefulSet", "DaemonSet", "Job", "CronJob":
+				workloads = append(workloads, domainresource.PodRelatedResourceView{Kind: owner.Kind, Name: owner.Name, Namespace: pod.Namespace})
+				if owner.Kind == "Job" && jobCronJobs[owner.Name] != "" {
+					workloads = append(workloads, domainresource.PodRelatedResourceView{Kind: "CronJob", Name: jobCronJobs[owner.Name], Namespace: pod.Namespace})
+				}
+			}
+		}
+		views = append(views, domainresource.NetworkRelatedPodView{PodView: mapPod(pod), Workloads: workloads})
+	}
+	return views
+}
+
 func mapEndpointSlice(item discoveryv1.EndpointSlice) domainresource.EndpointSliceView {
 	ports := make([]string, 0, len(item.Ports))
 	for _, port := range item.Ports {
@@ -2743,6 +3159,16 @@ func mapEndpointSlice(item discoveryv1.EndpointSlice) domainresource.EndpointSli
 		Endpoints:   len(item.Endpoints),
 		Ports:       ports,
 		AgeSeconds:  secondsSince(item.CreationTimestamp.Time),
+	}
+}
+
+func buildEndpointSliceDetail(item discoveryv1.EndpointSlice) domainresource.EndpointSliceDetailView {
+	summary := mapEndpointSlice(item)
+	return domainresource.EndpointSliceDetailView{
+		Name: summary.Name, Namespace: summary.Namespace, AddressType: summary.AddressType,
+		ServiceName: item.Labels[discoveryv1.LabelServiceName], Ports: summary.Ports,
+		Labels: item.Labels, Annotations: item.Annotations,
+		Endpoints: mapEndpointSliceEndpoints([]discoveryv1.EndpointSlice{item}), AgeSeconds: summary.AgeSeconds,
 	}
 }
 
@@ -2791,6 +3217,64 @@ func mapNetworkPolicy(item networkingv1.NetworkPolicy) domainresource.NetworkPol
 		EgressRules:  len(item.Spec.Egress),
 		AgeSeconds:   secondsSince(item.CreationTimestamp.Time),
 	}
+}
+
+func buildNetworkPolicyDetail(item networkingv1.NetworkPolicy, pods []domainresource.PodView) domainresource.NetworkPolicyDetailView {
+	summary := mapNetworkPolicy(item)
+	rules := make([]domainresource.NetworkPolicyRuleView, 0, len(item.Spec.Ingress)+len(item.Spec.Egress))
+	for _, rule := range item.Spec.Ingress {
+		rules = append(rules, domainresource.NetworkPolicyRuleView{Direction: "Ingress", Peers: mapPolicyPeers(rule.From), Ports: mapPolicyPorts(rule.Ports)})
+	}
+	for _, rule := range item.Spec.Egress {
+		rules = append(rules, domainresource.NetworkPolicyRuleView{Direction: "Egress", Peers: mapPolicyPeers(rule.To), Ports: mapPolicyPorts(rule.Ports)})
+	}
+	selector, _ := metav1.LabelSelectorAsSelector(&item.Spec.PodSelector)
+	return domainresource.NetworkPolicyDetailView{
+		Name: summary.Name, Namespace: summary.Namespace, PolicyTypes: summary.PolicyTypes,
+		PodSelector: selector.String(), Labels: item.Labels, Annotations: item.Annotations,
+		Rules: rules, MatchingPods: pods, AgeSeconds: summary.AgeSeconds,
+	}
+}
+
+func mapPolicyPeers(peers []networkingv1.NetworkPolicyPeer) []domainresource.NetworkPolicyPeerView {
+	views := make([]domainresource.NetworkPolicyPeerView, 0, len(peers))
+	for _, peer := range peers {
+		view := domainresource.NetworkPolicyPeerView{}
+		if peer.PodSelector != nil {
+			selector, _ := metav1.LabelSelectorAsSelector(peer.PodSelector)
+			view.PodSelector = selector.String()
+		}
+		if peer.NamespaceSelector != nil {
+			selector, _ := metav1.LabelSelectorAsSelector(peer.NamespaceSelector)
+			view.NamespaceSelector = selector.String()
+		}
+		if peer.IPBlock != nil {
+			view.IPBlock = peer.IPBlock.CIDR
+			if len(peer.IPBlock.Except) > 0 {
+				view.IPBlock += " except " + strings.Join(peer.IPBlock.Except, ", ")
+			}
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+func mapPolicyPorts(ports []networkingv1.NetworkPolicyPort) []domainresource.NetworkPolicyPortView {
+	views := make([]domainresource.NetworkPolicyPortView, 0, len(ports))
+	for _, port := range ports {
+		view := domainresource.NetworkPolicyPortView{}
+		if port.Protocol != nil {
+			view.Protocol = string(*port.Protocol)
+		}
+		if port.Port != nil {
+			view.Port = port.Port.String()
+		}
+		if port.EndPort != nil {
+			view.EndPort = *port.EndPort
+		}
+		views = append(views, view)
+	}
+	return views
 }
 
 func extractIngressBackendServices(item networkingv1.Ingress) []string {
@@ -2859,47 +3343,27 @@ func mapPersistentVolume(item corev1.PersistentVolume) domainresource.Persistent
 		accessModes = append(accessModes, string(mode))
 	}
 	claimRef := ""
+	claimNamespace, claimName := "", ""
 	if item.Spec.ClaimRef != nil {
 		claimRef = fmt.Sprintf("%s/%s", item.Spec.ClaimRef.Namespace, item.Spec.ClaimRef.Name)
+		claimNamespace, claimName = item.Spec.ClaimRef.Namespace, item.Spec.ClaimRef.Name
 	}
 	volumeMode := ""
 	if item.Spec.VolumeMode != nil {
 		volumeMode = string(*item.Spec.VolumeMode)
 	}
 	return domainresource.PersistentVolumeView{
-		Name:          item.Name,
-		Status:        string(item.Status.Phase),
-		StorageClass:  item.Spec.StorageClassName,
-		ClaimRef:      claimRef,
-		AccessModes:   accessModes,
-		Capacity:      capacity,
-		ReclaimPolicy: string(item.Spec.PersistentVolumeReclaimPolicy),
-		VolumeMode:    volumeMode,
-		AgeSeconds:    secondsSince(item.CreationTimestamp.Time),
-	}
-}
-
-func mapStorageClass(item storagev1.StorageClass) domainresource.StorageClassView {
-	reclaimPolicy := ""
-	if item.ReclaimPolicy != nil {
-		reclaimPolicy = string(*item.ReclaimPolicy)
-	}
-	volumeBindingMode := ""
-	if item.VolumeBindingMode != nil {
-		volumeBindingMode = string(*item.VolumeBindingMode)
-	}
-	allowVolumeExpansion := false
-	if item.AllowVolumeExpansion != nil {
-		allowVolumeExpansion = *item.AllowVolumeExpansion
-	}
-	return domainresource.StorageClassView{
-		Name:                 item.Name,
-		Provisioner:          item.Provisioner,
-		ReclaimPolicy:        reclaimPolicy,
-		VolumeBindingMode:    volumeBindingMode,
-		AllowVolumeExpansion: allowVolumeExpansion,
-		Parameters:           item.Parameters,
-		AgeSeconds:           secondsSince(item.CreationTimestamp.Time),
+		Name:           item.Name,
+		Status:         string(item.Status.Phase),
+		StorageClass:   item.Spec.StorageClassName,
+		ClaimRef:       claimRef,
+		ClaimNamespace: claimNamespace,
+		ClaimName:      claimName,
+		AccessModes:    accessModes,
+		Capacity:       capacity,
+		ReclaimPolicy:  string(item.Spec.PersistentVolumeReclaimPolicy),
+		VolumeMode:     volumeMode,
+		AgeSeconds:     secondsSince(item.CreationTimestamp.Time),
 	}
 }
 
@@ -2944,19 +3408,6 @@ func mapRuntimeClass(item nodev1.RuntimeClass) domainresource.RuntimeClassView {
 	}
 }
 
-func mapClusterRole(item rbacv1.ClusterRole) domainresource.ClusterRoleView {
-	aggregation := 0
-	if item.AggregationRule != nil {
-		aggregation = len(item.AggregationRule.ClusterRoleSelectors)
-	}
-	return domainresource.ClusterRoleView{
-		Name:             item.Name,
-		Rules:            len(item.Rules),
-		AggregationRules: aggregation,
-		AgeSeconds:       secondsSince(item.CreationTimestamp.Time),
-	}
-}
-
 func mapClusterRoleDetail(item rbacv1.ClusterRole) domainresource.ClusterRoleDetailView {
 	aggregation := 0
 	if item.AggregationRule != nil {
@@ -2975,18 +3426,9 @@ func mapClusterRoleDetail(item rbacv1.ClusterRole) domainresource.ClusterRoleDet
 }
 
 func mapClusterRoleBinding(item rbacv1.ClusterRoleBinding) domainresource.ClusterRoleBindingView {
-	subjects := make([]string, 0, len(item.Subjects))
-	for _, subject := range item.Subjects {
-		if strings.TrimSpace(subject.Namespace) != "" {
-			subjects = append(subjects, fmt.Sprintf("%s:%s/%s", subject.Kind, subject.Namespace, subject.Name))
-			continue
-		}
-		subjects = append(subjects, fmt.Sprintf("%s:%s", subject.Kind, subject.Name))
-	}
 	return domainresource.ClusterRoleBindingView{
 		Name:       item.Name,
 		RoleRef:    fmt.Sprintf("%s/%s", item.RoleRef.Kind, item.RoleRef.Name),
-		Subjects:   subjects,
 		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
 	}
 }
@@ -3012,20 +3454,123 @@ func mapClusterRoleBindingDetail(item rbacv1.ClusterRoleBinding) domainresource.
 	}
 }
 
-func mapMutatingWebhookConfiguration(item admissionregistrationv1.MutatingWebhookConfiguration) domainresource.MutatingWebhookConfigurationView {
-	return domainresource.MutatingWebhookConfigurationView{
-		Name:       item.Name,
-		Webhooks:   len(item.Webhooks),
-		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
+func mapMutatingWebhookConfigurationDetail(item admissionregistrationv1.MutatingWebhookConfiguration) domainresource.AdmissionWebhookConfigurationDetailView {
+	webhooks := make([]domainresource.AdmissionWebhookView, 0, len(item.Webhooks))
+	for _, webhook := range item.Webhooks {
+		view := mapAdmissionWebhook(webhook.Name, webhook.ClientConfig, webhook.Rules)
+		view.FailurePolicy = stringValue(webhook.FailurePolicy)
+		view.MatchPolicy = stringValue(webhook.MatchPolicy)
+		view.SideEffects = stringValue(webhook.SideEffects)
+		view.TimeoutSeconds = int32Value(webhook.TimeoutSeconds)
+		view.AdmissionReviewVersions = webhook.AdmissionReviewVersions
+		view.NamespaceSelector = formatLabelSelector(webhook.NamespaceSelector)
+		view.ObjectSelector = formatLabelSelector(webhook.ObjectSelector)
+		webhooks = append(webhooks, view)
+	}
+	return domainresource.AdmissionWebhookConfigurationDetailView{
+		Name:        item.Name,
+		Labels:      item.Labels,
+		Annotations: item.Annotations,
+		CreatedAt:   item.CreationTimestamp.Time.Format(time.RFC3339),
+		AgeSeconds:  secondsSince(item.CreationTimestamp.Time),
+		Webhooks:    webhooks,
 	}
 }
 
-func mapValidatingWebhookConfiguration(item admissionregistrationv1.ValidatingWebhookConfiguration) domainresource.ValidatingWebhookConfigurationView {
-	return domainresource.ValidatingWebhookConfigurationView{
-		Name:       item.Name,
-		Webhooks:   len(item.Webhooks),
-		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
+func mapValidatingWebhookConfigurationDetail(item admissionregistrationv1.ValidatingWebhookConfiguration) domainresource.AdmissionWebhookConfigurationDetailView {
+	webhooks := make([]domainresource.AdmissionWebhookView, 0, len(item.Webhooks))
+	for _, webhook := range item.Webhooks {
+		view := mapAdmissionWebhook(webhook.Name, webhook.ClientConfig, webhook.Rules)
+		view.FailurePolicy = stringValue(webhook.FailurePolicy)
+		view.MatchPolicy = stringValue(webhook.MatchPolicy)
+		view.SideEffects = stringValue(webhook.SideEffects)
+		view.TimeoutSeconds = int32Value(webhook.TimeoutSeconds)
+		view.AdmissionReviewVersions = webhook.AdmissionReviewVersions
+		view.NamespaceSelector = formatLabelSelector(webhook.NamespaceSelector)
+		view.ObjectSelector = formatLabelSelector(webhook.ObjectSelector)
+		webhooks = append(webhooks, view)
 	}
+	return domainresource.AdmissionWebhookConfigurationDetailView{
+		Name:        item.Name,
+		Labels:      item.Labels,
+		Annotations: item.Annotations,
+		CreatedAt:   item.CreationTimestamp.Time.Format(time.RFC3339),
+		AgeSeconds:  secondsSince(item.CreationTimestamp.Time),
+		Webhooks:    webhooks,
+	}
+}
+
+func mapAdmissionWebhook(
+	name string,
+	client admissionregistrationv1.WebhookClientConfig,
+	rules []admissionregistrationv1.RuleWithOperations,
+) domainresource.AdmissionWebhookView {
+	view := domainresource.AdmissionWebhookView{
+		Name:               name,
+		CABundleConfigured: len(client.CABundle) > 0,
+		Rules:              mapAdmissionWebhookRules(rules),
+	}
+	if client.URL != nil {
+		view.URL = *client.URL
+		view.ClientTarget = *client.URL
+	}
+	if client.Service != nil {
+		view.ServiceName = client.Service.Name
+		view.ServiceNamespace = client.Service.Namespace
+		view.ClientTarget = client.Service.Namespace + "/" + client.Service.Name
+		if client.Service.Port != nil {
+			view.ServicePort = *client.Service.Port
+			view.ClientTarget += ":" + strconv.FormatInt(int64(*client.Service.Port), 10)
+		}
+		if client.Service.Path != nil {
+			view.ServicePath = *client.Service.Path
+			view.ClientTarget += *client.Service.Path
+		}
+	}
+	return view
+}
+
+func mapAdmissionWebhookRules(rules []admissionregistrationv1.RuleWithOperations) []domainresource.AdmissionWebhookRuleView {
+	views := make([]domainresource.AdmissionWebhookRuleView, 0, len(rules))
+	for _, rule := range rules {
+		operations := make([]string, 0, len(rule.Operations))
+		for _, operation := range rule.Operations {
+			operations = append(operations, string(operation))
+		}
+		views = append(views, domainresource.AdmissionWebhookRuleView{
+			Operations:  operations,
+			APIGroups:   rule.APIGroups,
+			APIVersions: rule.APIVersions,
+			Resources:   rule.Resources,
+			Scope:       stringValue(rule.Scope),
+		})
+	}
+	return views
+}
+
+func formatLabelSelector(selector *metav1.LabelSelector) string {
+	if selector == nil {
+		return ""
+	}
+	parsed, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil {
+		return ""
+	}
+	return parsed.String()
+}
+
+func stringValue[T ~string](value *T) string {
+	if value == nil {
+		return ""
+	}
+	return string(*value)
+}
+
+func int32Value(value *int32) int32 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func mapResourceQuota(item corev1.ResourceQuota) domainresource.ResourceQuotaView {
@@ -3051,6 +3596,15 @@ func mapResourceQuota(item corev1.ResourceQuota) domainresource.ResourceQuotaVie
 	}
 }
 
+func mapResourceQuotaDetail(item corev1.ResourceQuota) domainresource.ResourceQuotaDetailView {
+	return domainresource.ResourceQuotaDetailView{
+		ResourceQuotaView: mapResourceQuota(item),
+		Labels:            item.Labels,
+		Annotations:       item.Annotations,
+		CreatedAt:         item.CreationTimestamp.Time.Format(time.RFC3339),
+	}
+}
+
 func mapLimitRange(item corev1.LimitRange) domainresource.LimitRangeView {
 	return domainresource.LimitRangeView{
 		Name:       item.Name,
@@ -3058,6 +3612,35 @@ func mapLimitRange(item corev1.LimitRange) domainresource.LimitRangeView {
 		Limits:     len(item.Spec.Limits),
 		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
 	}
+}
+
+func mapLimitRangeDetail(item corev1.LimitRange) domainresource.LimitRangeDetailView {
+	rules := make([]domainresource.LimitRangeRuleView, 0, len(item.Spec.Limits))
+	for _, rule := range item.Spec.Limits {
+		rules = append(rules, domainresource.LimitRangeRuleView{
+			Type:                 string(rule.Type),
+			Min:                  resourceListStrings(rule.Min),
+			Max:                  resourceListStrings(rule.Max),
+			Default:              resourceListStrings(rule.Default),
+			DefaultRequest:       resourceListStrings(rule.DefaultRequest),
+			MaxLimitRequestRatio: resourceListStrings(rule.MaxLimitRequestRatio),
+		})
+	}
+	return domainresource.LimitRangeDetailView{
+		LimitRangeView: mapLimitRange(item),
+		Labels:         item.Labels,
+		Annotations:    item.Annotations,
+		CreatedAt:      item.CreationTimestamp.Time.Format(time.RFC3339),
+		Rules:          rules,
+	}
+}
+
+func resourceListStrings(resources corev1.ResourceList) map[string]string {
+	values := make(map[string]string, len(resources))
+	for name, quantity := range resources {
+		values[string(name)] = quantity.String()
+	}
+	return values
 }
 
 func mapLease(item coordinationv1.Lease) domainresource.LeaseView {
@@ -3101,42 +3684,6 @@ func mapReplicationController(item corev1.ReplicationController) domainresource.
 		ReadyReplicas:     item.Status.ReadyReplicas,
 		AvailableReplicas: item.Status.AvailableReplicas,
 		AgeSeconds:        secondsSince(item.CreationTimestamp.Time),
-	}
-}
-
-func mapNode(item corev1.Node) domainresource.NodeView {
-	roles := make([]string, 0)
-	for key := range item.Labels {
-		if strings.HasPrefix(key, "node-role.kubernetes.io/") {
-			roles = append(roles, strings.TrimPrefix(key, "node-role.kubernetes.io/"))
-		}
-	}
-	sort.Strings(roles)
-	internalIP := ""
-	for _, address := range item.Status.Addresses {
-		if address.Type == corev1.NodeInternalIP {
-			internalIP = address.Address
-			break
-		}
-	}
-	status := "unknown"
-	for _, condition := range item.Status.Conditions {
-		if condition.Type == corev1.NodeReady {
-			if condition.Status == corev1.ConditionTrue {
-				status = "ready"
-			} else {
-				status = "not_ready"
-			}
-			break
-		}
-	}
-	return domainresource.NodeView{
-		Name:       item.Name,
-		Status:     status,
-		Roles:      roles,
-		Version:    item.Status.NodeInfo.KubeletVersion,
-		InternalIP: internalIP,
-		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
 	}
 }
 

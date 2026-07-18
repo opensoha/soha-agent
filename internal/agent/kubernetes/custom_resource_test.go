@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	metadatafake "k8s.io/client-go/metadata/fake"
 
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
 )
@@ -34,9 +35,17 @@ func TestCustomResourceCRUDUsesDynamicClient(t *testing.T) {
 		},
 		"spec": map[string]any{"size": "small"},
 	}}
+	metadataScheme := runtime.NewScheme()
+	if err := metav1.AddMetaToScheme(metadataScheme); err != nil {
+		t.Fatalf("add metadata types: %v", err)
+	}
+	metadataObject := &metav1.PartialObjectMetadata{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "example.com/v1", Kind: "Widget"},
+		ObjectMeta: metav1.ObjectMeta{Name: "sample", Namespace: "platform"},
+	}
 	client := &Client{dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		gvr: "WidgetList",
-	}, existing)}
+	}, existing), metadata: metadatafake.NewSimpleMetadataClient(metadataScheme, metadataObject)}
 
 	items, err := client.ListCustomResources(context.Background(), definition, "platform")
 	if err != nil {

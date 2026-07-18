@@ -227,6 +227,18 @@ func TestBuildPodDetailIncludesVolumesAndRelatedResources(t *testing.T) {
 	}
 }
 
+func TestBuildDetailedPodContainersLabelsRoles(t *testing.T) {
+	view := buildDetailedPodContainers(corev1.Pod{
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{{Name: "init", Image: "init:v1"}},
+			Containers:     []corev1.Container{{Name: "app", Image: "app:v1"}, {Name: "proxy", Image: "proxy:v1"}},
+		},
+	})
+	if len(view) != 3 || view[0].Role != "init" || view[1].Role != "main" || view[2].Role != "sidecar" {
+		t.Fatalf("container roles = %#v, want init/main/sidecar", view)
+	}
+}
+
 func findVolume(items []domainresource.PodVolumeView, name string) *domainresource.PodVolumeView {
 	for index := range items {
 		if items[index].Name == name {

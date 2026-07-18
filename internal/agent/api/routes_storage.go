@@ -18,6 +18,14 @@ func registerPlatformStorageRoutes(platform *gin.RouterGroup, client *k8sagent.C
 		}
 		apiresponse.Items(c, http.StatusOK, items)
 	})
+	platform.GET("/storage/persistentvolumeclaims/:name/detail", func(c *gin.Context) {
+		item, err := client.GetPersistentVolumeClaimDetail(c.Request.Context(), c.Query("namespace"), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
 	platform.GET("/storage/persistentvolumes", func(c *gin.Context) {
 		items, err := client.ListPersistentVolumes(c.Request.Context())
 		if err != nil {
@@ -26,6 +34,14 @@ func registerPlatformStorageRoutes(platform *gin.RouterGroup, client *k8sagent.C
 		}
 		apiresponse.Items(c, http.StatusOK, items)
 	})
+	platform.GET("/storage/persistentvolumes/:name/detail", func(c *gin.Context) {
+		item, err := client.GetPersistentVolumeDetail(c.Request.Context(), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
 	platform.GET("/storage/storageclasses", func(c *gin.Context) {
 		items, err := client.ListStorageClasses(c.Request.Context())
 		if err != nil {
@@ -33,5 +49,13 @@ func registerPlatformStorageRoutes(platform *gin.RouterGroup, client *k8sagent.C
 			return
 		}
 		apiresponse.Items(c, http.StatusOK, items)
+	})
+	platform.GET("/storage/storageclasses/:name/detail", func(c *gin.Context) {
+		item, err := client.GetStorageClassDetail(c.Request.Context(), c.Param("name"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
 	})
 }

@@ -64,10 +64,21 @@ func buildNodeDetail(node corev1.Node, pods []corev1.Pod) domainresource.NodeDet
 		AgeSeconds:  secondsSince(node.CreationTimestamp.Time),
 		Labels:      cloneStringMap(node.Labels),
 		Annotations: cloneStringMap(node.Annotations),
+		Taints:      mapNodeTaints(node.Spec.Taints),
 		Conditions:  mapNodeConditions(node),
 		Resources:   buildNodeResourceSummary(node, aggregate),
 		Pods:        aggregate.pods,
 	}
+}
+
+func mapNodeTaints(items []corev1.Taint) []domainresource.NodeTaintView {
+	taints := make([]domainresource.NodeTaintView, 0, len(items))
+	for _, item := range items {
+		taints = append(taints, domainresource.NodeTaintView{
+			Key: item.Key, Value: item.Value, Effect: string(item.Effect),
+		})
+	}
+	return taints
 }
 
 func buildNodeResourceSummary(node corev1.Node, aggregate nodeAggregate) domainresource.NodeResourceSummaryView {

@@ -10,27 +10,44 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/metadata"
 	"sigs.k8s.io/yaml"
 
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
 )
 
 func (c *Client) ListCustomResources(ctx context.Context, definition domainresource.CRDResourceDefinition, namespace string) ([]domainresource.CustomResourceView, error) {
-	resource, _, err := c.customResource(definition, namespace, nil)
+	gvr, err := customResourceGVR(definition)
 	if err != nil {
 		return nil, err
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	var resource metadata.ResourceInterface = c.metadata.Resource(gvr)
+	if definition.Namespaced && strings.TrimSpace(namespace) != "" {
+		resource = c.metadata.Resource(gvr).Namespace(strings.TrimSpace(namespace))
+	}
 	items, err := resource.List(queryCtx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
 	views := make([]domainresource.CustomResourceView, 0, len(items.Items))
 	for _, item := range items.Items {
-		views = append(views, mapCustomResource(item, definition))
+		views = append(views, mapCustomResourceMetadata(item, definition))
 	}
 	return views, nil
+}
+
+func mapCustomResourceMetadata(item metav1.PartialObjectMetadata, definition domainresource.CRDResourceDefinition) domainresource.CustomResourceView {
+	return domainresource.CustomResourceView{
+		APIVersion: definition.Group + "/" + definition.Version,
+		Kind:       definition.Kind,
+		Name:       item.Name,
+		Namespace:  item.Namespace,
+		Labels:     item.Labels,
+		CreatedAt:  item.CreationTimestamp.Time.UTC().Format(time.RFC3339),
+		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
+	}
 }
 
 func (c *Client) GetCustomResourceYAML(ctx context.Context, definition domainresource.CRDResourceDefinition, namespace, name string) (domainresource.ResourceYAMLView, error) {
@@ -217,20 +234,4 @@ func renderCustomResourceYAML(kind string, item *unstructured.Unstructured) (dom
 		Namespace: item.GetNamespace(),
 		Content:   string(content),
 	}, nil
-}
-
-func mapCustomResource(item unstructured.Unstructured, definition domainresource.CRDResourceDefinition) domainresource.CustomResourceView {
-	apiVersion := strings.TrimSpace(item.GetAPIVersion())
-	if apiVersion == "" && definition.Group != "" && definition.Version != "" {
-		apiVersion = definition.Group + "/" + definition.Version
-	}
-	return domainresource.CustomResourceView{
-		APIVersion: apiVersion,
-		Kind:       definition.Kind,
-		Name:       item.GetName(),
-		Namespace:  item.GetNamespace(),
-		Labels:     item.GetLabels(),
-		CreatedAt:  item.GetCreationTimestamp().Time.UTC().Format(time.RFC3339),
-		AgeSeconds: secondsSince(item.GetCreationTimestamp().Time),
-	}
 }

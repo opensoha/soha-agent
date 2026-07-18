@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -91,6 +92,240 @@ func (c *Client) ListReferenceGrants(ctx context.Context, namespace string) ([]d
 		views = append(views, mapReferenceGrantResource(item))
 	}
 	return views, nil
+}
+
+func (c *Client) GetGatewayClassDetail(ctx context.Context, name string) (domainresource.GatewayClassDetailView, error) {
+	item, err := c.getDynamicResource(ctx, "", "gateway.networking.k8s.io", gatewayVersions, "gatewayclasses", name)
+	if err != nil {
+		return domainresource.GatewayClassDetailView{}, err
+	}
+	gatewayItems, err := c.listAllNamespacedDynamicResources(ctx, "gateway.networking.k8s.io", gatewayVersions, "gateways")
+	if err != nil {
+		return domainresource.GatewayClassDetailView{}, err
+	}
+	related := make([]domainresource.GatewayView, 0)
+	for _, gatewayItem := range gatewayItems {
+		gateway := mapGatewayResource(gatewayItem)
+		if gateway.GatewayClass == name {
+			related = append(related, gateway)
+		}
+	}
+	return domainresource.GatewayClassDetailView{
+		GatewayClassView: mapGatewayClassResource(item),
+		Labels:           item.GetLabels(),
+		Annotations:      item.GetAnnotations(),
+		Conditions:       gatewayConditionViews(item, ""),
+		Gateways:         related,
+	}, nil
+}
+
+func (c *Client) GetGatewayDetail(ctx context.Context, namespace, name string) (domainresource.GatewayDetailView, error) {
+	item, err := c.getDynamicResource(ctx, namespace, "gateway.networking.k8s.io", gatewayVersions, "gateways", name)
+	if err != nil {
+		return domainresource.GatewayDetailView{}, err
+	}
+	routes, err := c.gatewayRelatedRoutes(ctx, namespace, name)
+	if err != nil {
+		return domainresource.GatewayDetailView{}, err
+	}
+	return domainresource.GatewayDetailView{
+		GatewayView: mapGatewayResource(item),
+		Labels:      item.GetLabels(),
+		Annotations: item.GetAnnotations(),
+		Conditions:  gatewayConditionViews(item, ""),
+		Listeners:   gatewayListenerViews(item),
+		Routes:      routes,
+	}, nil
+}
+
+func (c *Client) GetHTTPRouteDetail(ctx context.Context, namespace, name string) (domainresource.HTTPRouteDetailView, error) {
+	item, err := c.getDynamicResource(ctx, namespace, "gateway.networking.k8s.io", httpRouteVersions, "httproutes", name)
+	if err != nil {
+		return domainresource.HTTPRouteDetailView{}, err
+	}
+	detail := domainresource.HTTPRouteDetailView{
+		HTTPRouteView:  mapHTTPRouteResource(item),
+		Labels:         item.GetLabels(),
+		Annotations:    item.GetAnnotations(),
+		Conditions:     gatewayConditionViews(item, "parents"),
+		ParentStatuses: gatewayRouteParentStatusViews(item),
+		Rules:          gatewayRouteRuleViews(item),
+	}
+	enrichGatewayBackends(ctx, c, &detail.Rules)
+	return detail, nil
+}
+
+func (c *Client) GetGRPCRouteDetail(ctx context.Context, namespace, name string) (domainresource.GRPCRouteDetailView, error) {
+	item, err := c.getDynamicResource(ctx, namespace, "gateway.networking.k8s.io", grpcRouteVersions, "grpcroutes", name)
+	if err != nil {
+		return domainresource.GRPCRouteDetailView{}, err
+	}
+	detail := domainresource.GRPCRouteDetailView{
+		GRPCRouteView:  mapGRPCRouteResource(item),
+		Labels:         item.GetLabels(),
+		Annotations:    item.GetAnnotations(),
+		Conditions:     gatewayConditionViews(item, "parents"),
+		ParentStatuses: gatewayRouteParentStatusViews(item),
+		Rules:          gatewayRouteRuleViews(item),
+	}
+	enrichGatewayBackends(ctx, c, &detail.Rules)
+	return detail, nil
+}
+
+func enrichGatewayBackends(ctx context.Context, client *Client, rules *[]domainresource.GatewayRouteRuleView) {
+	if client == nil || client.typed == nil {
+		return
+	}
+	for ruleIndex := range *rules {
+		for backendIndex := range (*rules)[ruleIndex].Backends {
+			backend := &(*rules)[ruleIndex].Backends[backendIndex]
+			if !strings.EqualFold(backend.Kind, "Service") {
+				continue
+			}
+			service, err := client.GetServiceDetail(ctx, backend.Namespace, backend.Name)
+			if err != nil {
+				continue
+			}
+			backend.Endpoints = service.Endpoints
+			backend.BackendPods = service.BackendPods
+		}
+	}
+}
+
+func (c *Client) GetBackendTLSPolicyDetail(ctx context.Context, namespace, name string) (domainresource.BackendTLSPolicyDetailView, error) {
+	item, err := c.getDynamicResource(ctx, namespace, "gateway.networking.k8s.io", backendTLSPolicyVersions, "backendtlspolicies", name)
+	if err != nil {
+		return domainresource.BackendTLSPolicyDetailView{}, err
+	}
+	return domainresource.BackendTLSPolicyDetailView{
+		BackendTLSPolicyView: mapBackendTLSPolicyResource(item),
+		Labels:               item.GetLabels(),
+		Annotations:          item.GetAnnotations(),
+		Conditions:           gatewayConditionViews(item, "ancestors"),
+	}, nil
+}
+
+func (c *Client) GetReferenceGrantDetail(ctx context.Context, namespace, name string) (domainresource.ReferenceGrantDetailView, error) {
+	item, err := c.getDynamicResource(ctx, namespace, "gateway.networking.k8s.io", referenceGrantVersions, "referencegrants", name)
+	if err != nil {
+		return domainresource.ReferenceGrantDetailView{}, err
+	}
+	return domainresource.ReferenceGrantDetailView{
+		ReferenceGrantView: mapReferenceGrantResource(item),
+		Labels:             item.GetLabels(),
+		Annotations:        item.GetAnnotations(),
+		FromRefs:           gatewayReferenceGrantFromViews(item),
+		ToRefs:             gatewayReferenceGrantToViews(item),
+	}, nil
+}
+
+func (c *Client) GetIngressClassDetail(ctx context.Context, name string) (domainresource.IngressClassDetailView, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	item, err := c.typed.NetworkingV1().IngressClasses().Get(queryCtx, name, metav1.GetOptions{})
+	if err != nil {
+		return domainresource.IngressClassDetailView{}, err
+	}
+	related := make([]domainresource.IngressView, 0)
+	continueToken := ""
+	// ponytail: reverse lookups scan pages of 500; replace with an informer index if this becomes a hot path.
+	for {
+		ingresses, listErr := c.typed.NetworkingV1().Ingresses("").List(queryCtx, metav1.ListOptions{
+			Limit: int64(agentTablePageSize), Continue: continueToken,
+		})
+		if listErr != nil {
+			return domainresource.IngressClassDetailView{}, listErr
+		}
+		for _, ingress := range ingresses.Items {
+			className := ingress.Annotations["kubernetes.io/ingress.class"]
+			if ingress.Spec.IngressClassName != nil {
+				className = *ingress.Spec.IngressClassName
+			}
+			if className == name {
+				related = append(related, mapIngress(ingress))
+			}
+		}
+		if ingresses.Continue == "" {
+			break
+		}
+		if ingresses.Continue == continueToken {
+			return domainresource.IngressClassDetailView{}, fmt.Errorf("ingress listing returned a repeated continue token")
+		}
+		continueToken = ingresses.Continue
+	}
+	return domainresource.IngressClassDetailView{
+		IngressClassView: mapIngressClass(*item),
+		Labels:           item.Labels,
+		Annotations:      item.Annotations,
+		Ingresses:        related,
+	}, nil
+}
+
+func (c *Client) getDynamicResource(
+	ctx context.Context,
+	namespace string,
+	group string,
+	versions []string,
+	resource string,
+	name string,
+) (unstructured.Unstructured, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var lastErr error
+	for _, version := range versions {
+		gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
+		var item *unstructured.Unstructured
+		var err error
+		if namespace == "" {
+			item, err = c.dynamic.Resource(gvr).Get(queryCtx, name, metav1.GetOptions{})
+		} else {
+			item, err = c.dynamic.Resource(gvr).Namespace(namespace).Get(queryCtx, name, metav1.GetOptions{})
+		}
+		if err == nil {
+			return *item, nil
+		}
+		if !isOptionalGatewayAPIResourceMissing(err) {
+			return unstructured.Unstructured{}, err
+		}
+		lastErr = err
+	}
+	return unstructured.Unstructured{}, lastErr
+}
+
+func (c *Client) listAllNamespacedDynamicResources(
+	ctx context.Context,
+	group string,
+	versions []string,
+	resource string,
+) ([]unstructured.Unstructured, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// ponytail: reverse lookups scan pages of 500; replace with an informer index if this becomes a hot path.
+	for _, version := range versions {
+		gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
+		items := make([]unstructured.Unstructured, 0)
+		continueToken := ""
+		for {
+			page, err := c.dynamic.Resource(gvr).Namespace("").List(queryCtx, metav1.ListOptions{
+				Limit: int64(agentTablePageSize), Continue: continueToken,
+			})
+			if err != nil {
+				if isOptionalGatewayAPIResourceMissing(err) {
+					break
+				}
+				return nil, err
+			}
+			items = append(items, page.Items...)
+			if page.GetContinue() == "" {
+				return items, nil
+			}
+			if page.GetContinue() == continueToken {
+				return nil, fmt.Errorf("%s listing returned a repeated continue token", resource)
+			}
+			continueToken = page.GetContinue()
+		}
+	}
+	return []unstructured.Unstructured{}, nil
 }
 
 func (c *Client) listClusterDynamicResources(ctx context.Context, group string, versions []string, resource string) ([]unstructured.Unstructured, error) {
@@ -251,6 +486,289 @@ func mapReferenceGrantResource(item unstructured.Unstructured) domainresource.Re
 		From:       fromRefs,
 		To:         toRefs,
 		AgeSeconds: secondsSince(item.GetCreationTimestamp().Time),
+	}
+}
+
+func (c *Client) gatewayRelatedRoutes(ctx context.Context, namespace, gatewayName string) ([]domainresource.GatewayRouteReferenceView, error) {
+	types := []struct {
+		kind     string
+		versions []string
+		resource string
+		mapRoute func(unstructured.Unstructured) ([]string, string)
+	}{
+		{
+			kind: "HTTPRoute", versions: httpRouteVersions, resource: "httproutes",
+			mapRoute: func(item unstructured.Unstructured) ([]string, string) {
+				view := mapHTTPRouteResource(item)
+				return view.Hostnames, gatewayRouteAccepted(item, namespace, gatewayName)
+			},
+		},
+		{
+			kind: "GRPCRoute", versions: grpcRouteVersions, resource: "grpcroutes",
+			mapRoute: func(item unstructured.Unstructured) ([]string, string) {
+				view := mapGRPCRouteResource(item)
+				return view.Hostnames, gatewayRouteAccepted(item, namespace, gatewayName)
+			},
+		},
+	}
+	routes := make([]domainresource.GatewayRouteReferenceView, 0)
+	for _, routeType := range types {
+		items, err := c.listAllNamespacedDynamicResources(
+			ctx,
+			"gateway.networking.k8s.io",
+			routeType.versions,
+			routeType.resource,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			if !gatewayHasParent(item, namespace, gatewayName) {
+				continue
+			}
+			hostnames, accepted := routeType.mapRoute(item)
+			routes = append(routes, domainresource.GatewayRouteReferenceView{
+				Kind: routeType.kind, Namespace: item.GetNamespace(), Name: item.GetName(),
+				Hostnames: hostnames, Accepted: accepted,
+			})
+		}
+	}
+	return routes, nil
+}
+
+func gatewayListenerViews(item unstructured.Unstructured) []domainresource.GatewayListenerView {
+	listenerItems := gatewayNestedSlice(item.Object, "spec", "listeners")
+	statusItems := gatewayNestedSlice(item.Object, "status", "listeners")
+	attached := make(map[string]int32, len(statusItems))
+	conditions := make(map[string][]domainresource.WorkloadConditionView, len(statusItems))
+	for _, raw := range statusItems {
+		status, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := status["name"].(string)
+		attached[name] = int32(gatewayInt64(status["attachedRoutes"]))
+		conditions[name] = gatewayConditionViewsFromRaw(gatewayNestedSlice(status, "conditions"))
+	}
+	views := make([]domainresource.GatewayListenerView, 0, len(listenerItems))
+	for _, raw := range listenerItems {
+		listener, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := listener["name"].(string)
+		protocol, _ := listener["protocol"].(string)
+		hostname, _ := listener["hostname"].(string)
+		tls := gatewayNestedMap(listener, "tls")
+		tlsMode, _ := tls["mode"].(string)
+		allowedKinds := gatewayFormatObjectRefList("", gatewayNestedSlice(listener, "allowedRoutes", "kinds"))
+		views = append(views, domainresource.GatewayListenerView{
+			Name:              name,
+			Protocol:          protocol,
+			Port:              int32(gatewayInt64(listener["port"])),
+			Hostname:          hostname,
+			TLSMode:           tlsMode,
+			CertificateRefs:   gatewayFormatObjectRefList(item.GetNamespace(), gatewayNestedSlice(tls, "certificateRefs")),
+			AllowedRouteKinds: allowedKinds,
+			AttachedRoutes:    attached[name],
+			Conditions:        conditions[name],
+		})
+	}
+	return views
+}
+
+func gatewayRouteRuleViews(item unstructured.Unstructured) []domainresource.GatewayRouteRuleView {
+	ruleItems := gatewayNestedSlice(item.Object, "spec", "rules")
+	views := make([]domainresource.GatewayRouteRuleView, 0, len(ruleItems))
+	for _, raw := range ruleItems {
+		rule, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		views = append(views, domainresource.GatewayRouteRuleView{
+			Matches:  gatewayJSONSummaries(gatewayNestedSlice(rule, "matches")),
+			Filters:  gatewayJSONSummaries(gatewayNestedSlice(rule, "filters")),
+			Backends: gatewayRouteBackendViews(item.GetNamespace(), gatewayNestedSlice(rule, "backendRefs")),
+		})
+	}
+	return views
+}
+
+func gatewayRouteBackendViews(defaultNamespace string, rawBackends []any) []domainresource.GatewayRouteBackendView {
+	views := make([]domainresource.GatewayRouteBackendView, 0, len(rawBackends))
+	for _, raw := range rawBackends {
+		backend, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := backend["name"].(string)
+		kind, _ := backend["kind"].(string)
+		namespace, _ := backend["namespace"].(string)
+		if kind == "" {
+			kind = "Service"
+		}
+		if namespace == "" {
+			namespace = defaultNamespace
+		}
+		view := domainresource.GatewayRouteBackendView{
+			Kind: kind, Namespace: namespace, Name: name,
+			Port: int32(gatewayInt64(backend["port"])), Weight: int32(gatewayInt64(backend["weight"])),
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+func gatewayConditionViews(item unstructured.Unstructured, collectionField string) []domainresource.WorkloadConditionView {
+	rawConditions := gatewayNestedSlice(item.Object, "status", "conditions")
+	if collectionField != "" {
+		for _, raw := range gatewayNestedSlice(item.Object, "status", collectionField) {
+			parent, ok := raw.(map[string]any)
+			if ok {
+				rawConditions = append(rawConditions, gatewayNestedSlice(parent, "conditions")...)
+			}
+		}
+	}
+	return gatewayConditionViewsFromRaw(rawConditions)
+}
+
+func gatewayConditionViewsFromRaw(rawConditions []any) []domainresource.WorkloadConditionView {
+	views := make([]domainresource.WorkloadConditionView, 0, len(rawConditions))
+	for _, raw := range rawConditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		conditionType, _ := condition["type"].(string)
+		status, _ := condition["status"].(string)
+		reason, _ := condition["reason"].(string)
+		message, _ := condition["message"].(string)
+		lastTransitionTime, _ := condition["lastTransitionTime"].(string)
+		views = append(views, domainresource.WorkloadConditionView{
+			Type: conditionType, Status: status, Reason: reason, Message: message, LastTransitionTime: lastTransitionTime,
+		})
+	}
+	return views
+}
+
+func gatewayRouteParentStatusViews(item unstructured.Unstructured) []domainresource.GatewayRouteParentStatusView {
+	parents := gatewayNestedSlice(item.Object, "status", "parents")
+	views := make([]domainresource.GatewayRouteParentStatusView, 0, len(parents))
+	for _, raw := range parents {
+		parent, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		controllerName, _ := parent["controllerName"].(string)
+		parentRef := gatewayNestedMap(parent, "parentRef")
+		views = append(views, domainresource.GatewayRouteParentStatusView{
+			ParentRef:      gatewayParentRefName(item.GetNamespace(), parentRef),
+			ControllerName: controllerName,
+			Conditions:     gatewayConditionViewsFromRaw(gatewayNestedSlice(parent, "conditions")),
+		})
+	}
+	return views
+}
+
+func gatewayParentRefName(defaultNamespace string, ref map[string]any) string {
+	name, _ := ref["name"].(string)
+	namespace, _ := ref["namespace"].(string)
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+	return strings.Trim(strings.Join([]string{namespace, name}, "/"), "/")
+}
+
+func gatewayReferenceGrantFromViews(item unstructured.Unstructured) []domainresource.ReferenceGrantFromView {
+	rawRefs := gatewayNestedSlice(item.Object, "spec", "from")
+	views := make([]domainresource.ReferenceGrantFromView, 0, len(rawRefs))
+	for _, raw := range rawRefs {
+		ref, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		group, _ := ref["group"].(string)
+		kind, _ := ref["kind"].(string)
+		namespace, _ := ref["namespace"].(string)
+		views = append(views, domainresource.ReferenceGrantFromView{Group: group, Kind: kind, Namespace: namespace})
+	}
+	return views
+}
+
+func gatewayReferenceGrantToViews(item unstructured.Unstructured) []domainresource.ReferenceGrantToView {
+	rawRefs := gatewayNestedSlice(item.Object, "spec", "to")
+	views := make([]domainresource.ReferenceGrantToView, 0, len(rawRefs))
+	for _, raw := range rawRefs {
+		ref, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		group, _ := ref["group"].(string)
+		kind, _ := ref["kind"].(string)
+		name, _ := ref["name"].(string)
+		views = append(views, domainresource.ReferenceGrantToView{Group: group, Kind: kind, Name: name})
+	}
+	return views
+}
+
+func gatewayHasParent(item unstructured.Unstructured, namespace, gatewayName string) bool {
+	needle := namespace + "/" + gatewayName
+	return slices.Contains(gatewayExtractParentRefs(item), needle)
+}
+
+func gatewayRouteAccepted(item unstructured.Unstructured, namespace, gatewayName string) string {
+	for _, raw := range gatewayNestedSlice(item.Object, "status", "parents") {
+		parent, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ref := gatewayNestedMap(parent, "parentRef")
+		name, _ := ref["name"].(string)
+		kind, _ := ref["kind"].(string)
+		refNamespace, _ := ref["namespace"].(string)
+		if kind == "" {
+			kind = "Gateway"
+		}
+		if refNamespace == "" {
+			refNamespace = item.GetNamespace()
+		}
+		if !strings.EqualFold(kind, "Gateway") || refNamespace != namespace || name != gatewayName {
+			continue
+		}
+		for _, rawCondition := range gatewayNestedSlice(parent, "conditions") {
+			condition, ok := rawCondition.(map[string]any)
+			if ok && condition["type"] == "Accepted" {
+				status, _ := condition["status"].(string)
+				return status
+			}
+		}
+	}
+	return ""
+}
+
+func gatewayJSONSummaries(items []any) []string {
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		encoded, err := json.Marshal(item)
+		if err == nil {
+			values = append(values, string(encoded))
+		}
+	}
+	return values
+}
+
+func gatewayInt64(value any) int64 {
+	switch typed := value.(type) {
+	case int64:
+		return typed
+	case int32:
+		return int64(typed)
+	case int:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	default:
+		return 0
 	}
 }
 
