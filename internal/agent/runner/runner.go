@@ -609,6 +609,7 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 		payload := map[string]any{
 			"logs":          []string{errorMessage},
 			"error":         errorMessage,
+			"failureStage":  workspaceFailureStage(workspaceErr),
 			"agentId":       agentID,
 			"workspacePath": workspacePath,
 		}
@@ -632,6 +633,7 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 	}
 
 	for index, command := range commands {
+		pipelineStage := commandPipelineStage(command)
 		r.updateActiveTask(task.ID, func(item *ActiveTask) {
 			item.Status = "running"
 			item.CurrentCommand = command
@@ -641,7 +643,7 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 		})
 		remoteTask, ok := r.callback(taskCtx, task, "running", extendMap(
 			buildHeartbeatPayload(agentID, command, index+1, commandCount),
-			map[string]any{"workspacePath": workspacePath},
+			map[string]any{"workspacePath": workspacePath, "pipelineStage": pipelineStage},
 		))
 		if ok && shouldStopLocalExecution(remoteTask.Status) {
 			return
@@ -695,6 +697,7 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 			map[string]any{
 				"logs":          commandLogs,
 				"workspacePath": workspacePath,
+				"pipelineStage": pipelineStage,
 			},
 		))
 		if ok && shouldStopLocalExecution(remoteTask.Status) {
@@ -769,6 +772,7 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 				"error":          err.Error(),
 				"agentId":        agentID,
 				"currentCommand": command,
+				"failureStage":   pipelineStage,
 				"workspacePath":  workspacePath,
 			})
 			r.metrics.markOutcome(metricScopeExecution, "failed")
@@ -783,8 +787,11 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 	}
 	if image := resolveImageFromCommands(task.Payload, commands); image != "" {
 		payload["image"] = image
-		payload["artifact"] = buildImageArtifact(task.Payload, image)
-		payload["artifacts"] = buildArtifactList(task.Payload, image)
+		if digest := imageDigestFromWorkspaceArtifacts(workspacePath, workspaceArtifacts); digest != "" {
+			payload["imageDigest"] = digest
+		}
+		payload["artifact"] = buildImageArtifact(payload, image)
+		payload["artifacts"] = buildArtifactList(payload, image)
 	}
 	if len(workspaceArtifacts) > 0 {
 		payload["workspaceArtifacts"] = workspaceArtifacts
@@ -1813,6 +1820,49 @@ func collectWorkspaceArtifacts(workspacePath string, files []string) []map[strin
 		})
 	}
 	return items
+}
+
+var imageDigestPattern = regexp.MustCompile(`sha256:[a-fA-F0-9]{64}`)
+
+func imageDigestFromWorkspaceArtifacts(workspacePath string, artifacts []map[string]any) string {
+	for _, artifact := range artifacts {
+		path := strings.TrimSpace(fmt.Sprint(artifact["path"]))
+		if path != ".soha-image-digest" || strings.TrimSpace(fmt.Sprint(artifact["status"])) != "completed" {
+			continue
+		}
+		full, err := resolveWorkspacePath(workspacePath, path)
+		if err != nil {
+			return ""
+		}
+		content, err := os.ReadFile(full)
+		if err != nil {
+			return ""
+		}
+		return imageDigestPattern.FindString(string(content))
+	}
+	return ""
+}
+
+func workspaceFailureStage(err error) string {
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "git clone") || strings.Contains(message, "git fetch") || strings.Contains(message, "git checkout") || strings.Contains(message, "git repository") {
+		return "checkout"
+	}
+	return "prepare"
+}
+
+func commandPipelineStage(command string) string {
+	command = strings.ToLower(strings.TrimSpace(command))
+	switch {
+	case strings.Contains(command, "docker push"):
+		return "push"
+	case strings.Contains(command, "digest-file"), strings.Contains(command, "image inspect"):
+		return "publish"
+	case strings.Contains(command, "docker build"), strings.Contains(command, "buildx build"), strings.HasPrefix(command, "executor "):
+		return "build"
+	default:
+		return "build"
+	}
 }
 
 func hasGitRepository(path string) bool {
