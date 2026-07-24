@@ -175,6 +175,7 @@ jobs:
       - name: Download binary artifacts
         uses: actions/download-artifact@v7
         with:
+          pattern: soha-agent-*
           path: artifacts
           merge-multiple: true
       - name: Generate checksum manifest
