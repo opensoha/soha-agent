@@ -16,7 +16,7 @@ Build metadata is injected with Go ldflags and is available from the CLI and HTT
 
 ```sh
 go build -trimpath \
-  -ldflags "-X github.com/opensoha/soha-agent/internal/agent/buildinfo.Version=v0.1.0 -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Commit=$(git rev-parse --short HEAD) -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -ldflags "-X github.com/opensoha/soha-agent/internal/agent/buildinfo.Version=v0.1.3 -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Commit=$(git rev-parse --short HEAD) -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -o bin/soha-agent ./cmd/agent
 bin/soha-agent --version
 curl -s http://127.0.0.1:18080/api/v1/build-info
@@ -77,13 +77,13 @@ Local diagnostics are available from `GET /api/v1/diagnostics`; the response is 
 The generic cluster agent image can be built with:
 
 ```sh
-make deploy-agent-image IMAGE_TAG=v0.1.0
+make deploy-agent-image IMAGE_TAG=v0.1.3
 ```
 
 The Hermes runner image can be built separately with:
 
 ```sh
-make deploy-hermes-image IMAGE_TAG=v0.1.0
+make deploy-hermes-image IMAGE_TAG=v0.1.3
 ```
 
 The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/arm64`) to GHCR as `ghcr.io/opensoha/soha-agent` and `ghcr.io/opensoha/soha-hermes-agent`, plus binary archives for Linux, macOS, and Windows. Each archive has a `.sha256` sidecar plus a release-level `SHA256SUMS` manifest.
