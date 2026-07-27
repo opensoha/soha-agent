@@ -34,10 +34,10 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 	}
 	sort.Strings(signatures)
 	routeDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(signatures, "\n"))))
-	if len(signatures) != 134 {
-		t.Fatalf("route count = %d, want 134", len(signatures))
+	if len(signatures) != 136 {
+		t.Fatalf("route count = %d, want 136", len(signatures))
 	}
-	const expectedRouteDigest = "a66b0eccbdbf2ea4054c19e90c37cb2e87ba762659371a7e61fd27ba73663869"
+	const expectedRouteDigest = "d9900b2fa1e7ac4b2f1798d05339ea18abaf3eb4290c4c7ab21be9e9be0b1695"
 	if routeDigest != expectedRouteDigest {
 		t.Fatalf("route digest = %s, want %s", routeDigest, expectedRouteDigest)
 	}

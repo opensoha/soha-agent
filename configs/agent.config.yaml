@@ -99,6 +99,14 @@ control_plane:
     workspace_root: ./.soha/agent-runtime
     poll_interval: 5s
     conformance_timeout: 5s
+  outpost:
+    enabled: false
+    agent_id: local-outpost-agent
+    protocol_version: v1
+    trust_key_id: ""
+    trust_public_key: ""
+    poll_interval: 5s
+    heartbeat_interval: 15s
 
 kubernetes:
   enabled: true

@@ -88,6 +88,8 @@ make deploy-hermes-image IMAGE_TAG=v0.1.3
 
 The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/arm64`) to GHCR as `ghcr.io/opensoha/soha-agent` and `ghcr.io/opensoha/soha-hermes-agent`, plus binary archives for Linux, macOS, and Windows. Each archive has a `.sha256` sidecar plus a release-level `SHA256SUMS` manifest.
 
+The packaged Outpost uses the same generic `soha-agent` image. Its protocol-matched Kubernetes install path and NGINX/Traefik ForwardAuth examples are documented in [`deploy/kubernetes/outpost`](./deploy/kubernetes/outpost/README.md). Helm packaging remains in `opensoha/soha-helm`; use the `soha-agent` chart with `mode=outpost`.
+
 ## Helm
 
 The Helm charts are published from `opensoha/soha-helm`:

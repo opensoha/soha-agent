@@ -82,6 +82,7 @@ type diagnosticsControlPlaneView struct {
 	} `json:"callbackRetry"`
 	Docker       diagnosticsDockerRunnerView `json:"docker"`
 	AgentRuntime diagnosticsAgentRuntimeView `json:"agentRuntime"`
+	Outpost      runnerpkg.OutpostStatus     `json:"outpost"`
 }
 
 type diagnosticsDockerRunnerView struct {
@@ -182,6 +183,11 @@ func buildDiagnosticsView(cfg cfgpkg.Config, kubernetesClientAvailable bool, run
 		view.Runtime.ActiveTasks = snapshot.ActiveTasks
 		view.Runtime.MetricsAvailable = true
 		view.Metrics = &snapshot
+	}
+	if outpost, ok := runtime.(interface {
+		OutpostStatus() runnerpkg.OutpostStatus
+	}); ok {
+		view.ControlPlane.Outpost = outpost.OutpostStatus()
 	}
 	return view
 }

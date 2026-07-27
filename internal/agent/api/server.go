@@ -51,6 +51,7 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 	registerPlatformRoutes(router, cfg, client, actions)
 	registerRuntimeRoutes(router, cfg, runtime, actions)
 	registerDockerRuntimeRoutes(router, cfg, logger, actions)
+	registerOutpostRoutes(router, cfg, runtime)
 
 	logger.Info("agent server configured",
 		zap.String("addr", cfg.HTTP.Addr),

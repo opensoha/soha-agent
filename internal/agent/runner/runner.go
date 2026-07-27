@@ -106,6 +106,7 @@ type Runner struct {
 	metrics             *runnerMetrics
 	providerRegistry    *DynamicAgentProviderRegistry
 	providerConformance AgentProviderConformanceProbe
+	outpost             *outpostRuntime
 }
 
 type ActiveTask struct {
@@ -425,6 +426,7 @@ func (r *Runner) Start(ctx context.Context) {
 		go r.agentProviderRegistryLoop(ctx)
 		go r.agentRuntimeLoop(ctx)
 	}
+	r.startOutpost(ctx)
 }
 
 func (r *Runner) loop(ctx context.Context) {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -70,6 +71,17 @@ type ControlPlaneConfig struct {
 	WorkspaceRoot   string              `mapstructure:"workspace_root"`
 	Docker          DockerRunnerConfig  `mapstructure:"docker"`
 	AgentRuntime    AgentRuntimeConfig  `mapstructure:"agent_runtime"`
+	Outpost         OutpostConfig       `mapstructure:"outpost"`
+}
+
+type OutpostConfig struct {
+	Enabled           bool          `mapstructure:"enabled"`
+	AgentID           string        `mapstructure:"agent_id"`
+	ProtocolVersion   string        `mapstructure:"protocol_version"`
+	TrustKeyID        string        `mapstructure:"trust_key_id"`
+	TrustPublicKey    string        `mapstructure:"trust_public_key"`
+	PollInterval      time.Duration `mapstructure:"poll_interval"`
+	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
 }
 
 type CallbackRetryConfig struct {
@@ -206,6 +218,30 @@ func Validate(cfg Config) error {
 			}
 		}
 	}
+	return validateOutpostConfig(cfg.ControlPlane)
+}
+
+func validateOutpostConfig(controlPlane ControlPlaneConfig) error {
+	if controlPlane.Outpost.Enabled {
+		if !controlPlane.Enabled {
+			return fmt.Errorf("control_plane.enabled must be true when control_plane.outpost.enabled is true")
+		}
+		if strings.TrimSpace(controlPlane.BaseURL) == "" || strings.TrimSpace(controlPlane.BearerToken) == "" {
+			return fmt.Errorf("control_plane base_url and bearer_token are required when outpost runtime is enabled")
+		}
+		if strings.TrimSpace(controlPlane.Outpost.AgentID) == "" {
+			return fmt.Errorf("control_plane.outpost.agent_id is required when outpost runtime is enabled")
+		}
+		if strings.TrimSpace(controlPlane.Outpost.TrustKeyID) == "" || strings.TrimSpace(controlPlane.Outpost.TrustPublicKey) == "" {
+			return fmt.Errorf("control_plane.outpost trust_key_id and trust_public_key are required when outpost runtime is enabled")
+		}
+		if controlPlane.Outpost.ProtocolVersion != "v1" {
+			return fmt.Errorf("control_plane.outpost.protocol_version must be v1")
+		}
+		if key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(controlPlane.Outpost.TrustPublicKey)); err != nil || len(key) != 32 {
+			return fmt.Errorf("control_plane.outpost.trust_public_key must be a base64-encoded Ed25519 public key")
+		}
+	}
 	return nil
 }
 
@@ -254,6 +290,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("control_plane.agent_runtime.providers.hermes.prompt_arg", "-q")
 	v.SetDefault("control_plane.agent_runtime.providers.hermes.skill_arg", "")
 	v.SetDefault("control_plane.agent_runtime.providers.hermes.provider_skill_arg", "-s")
+	v.SetDefault("control_plane.outpost.enabled", false)
+	v.SetDefault("control_plane.outpost.agent_id", "local-outpost-agent")
+	v.SetDefault("control_plane.outpost.protocol_version", "v1")
+	v.SetDefault("control_plane.outpost.trust_key_id", "")
+	v.SetDefault("control_plane.outpost.trust_public_key", "")
+	v.SetDefault("control_plane.outpost.poll_interval", "5s")
+	v.SetDefault("control_plane.outpost.heartbeat_interval", "15s")
 	v.SetDefault("kubernetes.enabled", true)
 	v.SetDefault("kubernetes.id", "local-agent")
 	v.SetDefault("kubernetes.name", "Local Agent")

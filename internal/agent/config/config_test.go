@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,26 @@ func TestValidateRequiresProductionControlPlaneToken(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Validate() succeeded, want control plane token error")
+	}
+}
+
+func TestValidateRequiresOutpostTrustAnchor(t *testing.T) {
+	err := Validate(Config{HTTP: HTTPConfig{Addr: "127.0.0.1:18080"}, ControlPlane: ControlPlaneConfig{
+		Enabled: true, BaseURL: "https://soha.example.com", BearerToken: "token",
+		Outpost: OutpostConfig{Enabled: true, AgentID: "agent"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "trust_key_id") {
+		t.Fatalf("Validate() error = %v, want trust anchor error", err)
+	}
+}
+
+func TestValidateAcceptsOutpostTrustAnchor(t *testing.T) {
+	err := Validate(Config{HTTP: HTTPConfig{Addr: "127.0.0.1:18080"}, ControlPlane: ControlPlaneConfig{
+		Enabled: true, BaseURL: "https://soha.example.com", BearerToken: "token",
+		Outpost: OutpostConfig{Enabled: true, AgentID: "agent", ProtocolVersion: "v1", TrustKeyID: "key-1", TrustPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32))},
+	}})
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }
 
