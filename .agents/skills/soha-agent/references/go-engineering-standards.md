@@ -15,6 +15,7 @@ Apply this reference to production Go changes in `soha-agent`. Repository contra
 - `internal/agent/api` owns Gin middleware, authentication, action policy, route registration, HTTP/WebSocket boundaries, diagnostics, and public error shaping.
 - `internal/agent/kubernetes` owns Kubernetes/Helm clients, provider objects, resource mutation, logs, terminal, port-forward, and cluster-specific mapping.
 - `internal/agent/runner` owns claim, heartbeat, callback, workspace, Docker, Agent Runtime, retry, cancel, timeout, metrics, and terminal-state idempotency.
+- `internal/agent/environment` owns environment leases, runtime launch/stop, snapshots, cleanup, and recovery.
 - Keep `api/server.go` as assembly and lifecycle code. Register endpoint families from focused `routes_*.go` files. Splitting methods across files without reducing a broad dependency or responsibility surface is not an architecture improvement.
 - Do not create generic helpers, reflection CRUD, or a universal runtime facade. Extract shared logic only when semantics and ownership are stable.
 - Keep every new production function at cyclomatic complexity 20 or below. When changing an existing hotspot above 20, reduce or split it as part of the change; do not add another branch to a known oversized dispatcher.
@@ -39,7 +40,7 @@ Apply this reference to production Go changes in `soha-agent`. Repository contra
 
 ## Runner Contracts
 
-- Treat execution, Docker, and Agent Runtime flows as durable claim/heartbeat/callback state machines.
+- Treat execution, Docker, Identity Outpost, environment runtime, and Agent Runtime flows as durable state machines with explicit ownership.
 - Make terminal states idempotent and reject stale callbacks after cancel, timeout, or retry. Rotate attempt credentials where the control-plane contract requires it.
 - Enforce `max_concurrency`, default timeouts, retry limits, allowed operation kinds, and workspace roots. Never allow payload paths or commands to escape configured boundaries.
 - Normalize provider-native results into Soha contract DTOs. Keep secret material and raw provider state out of callbacks, metrics, logs, and diagnostics.

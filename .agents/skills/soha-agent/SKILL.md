@@ -7,8 +7,9 @@ description: >-
   Use when changing the agent HTTP API, Kubernetes proxy routes, Helm/resource
   mutation handlers, pod logs/terminal/port-forward streams, config loading,
   production security validation, action allowlists and audit, control-plane
-  claim/heartbeat/callback runners, Docker operation runners, Agent Runtime
-  provider execution, Hermes runner packaging, or Kubernetes deployment assets.
+  claim/heartbeat/callback runners, Docker operation runners, Identity Outpost
+  runtime, environment runtime management, Agent Runtime provider execution,
+  Hermes runner packaging, or Kubernetes deployment assets.
   This skill enforces standalone-agent boundaries, no imports from the core
   `soha` repository internals, explicit mutation allowlists, redacted errors,
   contract DTO compatibility, runner idempotency around terminal states, and
@@ -28,14 +29,16 @@ control plane, and calls back with task, Docker, or Agent Runtime results.
 1. Read `references/go-engineering-standards.md` for every production Go change. Keep `cmd/agent/main.go` thin. Startup belongs in `internal/agent/bootstrap`, config in `internal/agent/config`, HTTP surfaces in `internal/agent/api`, Kubernetes access in `internal/agent/kubernetes`, and control-plane execution in `internal/agent/runner`.
 2. Do not import core `github.com/opensoha/soha/internal/**` packages. Share API shapes through released `github.com/opensoha/soha-contracts` types.
 3. Use `SOHA_AGENT_CONFIG_FILE`, `SOHA_AGENT_*` env overrides, and `configs/agent.config.yaml` as the config path. Keep viper env keys aligned with config struct tags.
-4. When adding a runtime capability, decide whether it is local HTTP API, Kubernetes proxy, execution runner, Docker runner, Agent Runtime provider work, or packaging. Put it in the existing owner.
+4. When adding a runtime capability, decide whether it belongs to the local HTTP API, Kubernetes adapter, execution or Docker runner, Identity Outpost, environment runtime manager, Agent Runtime provider, or packaging. Put it in the existing owner.
 5. Keep diagnostics safe. `/api/v1/diagnostics` may summarize readiness and counts; it must not expose bearer tokens, kubeconfig contents, command secrets, or raw internal failures.
+6. For broad package or dependency changes, query `graphify-out/graph.json`. Refresh it only after source changes are stable and the worktree contents are understood; use `--force` after deletions and run diagnostics.
 
 ## Architecture Rules
 
 - Keep `internal/agent/api/server.go` focused on Gin construction, middleware, route registrar calls, and server lifecycle. Add endpoint families to focused `routes_*.go` files; do not rebuild a monolithic server or God Service across multiple files.
 - Keep interfaces narrow and owned by the consuming package. Wire concrete Kubernetes and runner implementations in bootstrap; do not add globals, `init` service setup, a DI container, or imports from the core Soha internals.
 - Keep provider-specific Kubernetes/Helm and runner execution details behind their owning packages. HTTP handlers parse, authorize, delegate, and map redacted responses only.
+- Keep environment lease, launch, stop, snapshot, and cleanup behavior in `internal/agent/environment`; runners coordinate it through narrow interfaces.
 - Preserve bounded concurrency, context cancellation, timeouts, stream limits, and graceful shutdown for every goroutine or external operation.
 
 ## Security Rules
@@ -53,6 +56,7 @@ control plane, and calls back with task, Docker, or Agent Runtime results.
 - Keep workspace path handling bounded under configured roots. Do not let task payloads write arbitrary host paths.
 - For Agent Runtime providers, normalize provider output into control-plane callback contracts. Do not leak provider-native state directly into external APIs.
 - Metrics and active-task views should reflect claims, misses, heartbeats, callbacks, failures, cancellations, and timeouts.
+- Identity Outpost claim, heartbeat, access checks, signed configuration, and event delivery must preserve trust-key validation, configuration-lease replay protection, and redaction.
 
 ## Packaging Rules
 
@@ -67,6 +71,7 @@ control plane, and calls back with task, Docker, or Agent Runtime results.
 - Run `GOWORK=off go test ./...` for normal changes; do not rely on a sibling `go.work` or unreviewed local contract code.
 - Run `go test ./internal/agent/api` for auth, action allowlist, route, and stream changes.
 - Run `go test ./internal/agent/runner` for claim/callback, Docker runner, Agent Runtime, cancellation, timeout, and metrics changes.
+- Run `go test ./internal/agent/environment` for environment lease, process/container runtime, snapshot, cleanup, and recovery changes.
 - Run `go test ./internal/agent/kubernetes` for Kubernetes proxy behavior, YAML, logs, terminal, Helm, port-forward, and CRD changes.
 - Run `go vet ./...` and `go test -race ./...` for concurrency or runner changes.
 
