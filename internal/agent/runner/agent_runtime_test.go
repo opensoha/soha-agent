@@ -628,7 +628,7 @@ JSON
 		ProviderKind:   "hermes",
 		CapabilityID:   "root_cause",
 		CallbackToken:  "callback-token",
-		TimeoutSeconds: 5,
+		TimeoutSeconds: 30,
 	})
 
 	if atomic.LoadInt32(&runningCallbacks) < 2 {

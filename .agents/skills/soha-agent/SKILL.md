@@ -13,7 +13,7 @@ description: >-
   This skill enforces standalone-agent boundaries, no imports from the core
   `soha` repository internals, explicit mutation allowlists, redacted errors,
   contract DTO compatibility, runner idempotency around terminal states, and
-  Go 1.25 build, dependency, race, lint, and vulnerability gates.
+  Go 1.26.5 build, dependency, race, lint, and vulnerability gates.
 ---
 
 # Soha Agent
@@ -74,6 +74,27 @@ control plane, and calls back with task, Docker, or Agent Runtime results.
 - Run `go test ./internal/agent/environment` for environment lease, process/container runtime, snapshot, cleanup, and recovery changes.
 - Run `go test ./internal/agent/kubernetes` for Kubernetes proxy behavior, YAML, logs, terminal, Helm, port-forward, and CRD changes.
 - Run `go vet ./...` and `go test -race ./...` for concurrency or runner changes.
+
+## CI Gate
+
+Use Go `1.26.5` and run the full gate for dependency, packaging, Dockerfile, workflow, or release changes:
+
+```bash
+GOWORK=off go mod tidy
+git diff --exit-code -- go.mod go.sum
+GOWORK=off go mod verify
+GOWORK=off go test ./...
+GOWORK=off go test -race ./...
+GOWORK=off go vet ./...
+GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
+GOWORK=off CGO_ENABLED=0 go build -o /tmp/soha-agent ./cmd/agent
+kubectl kustomize deploy/kubernetes/outpost | kubectl apply --dry-run=client -f -
+docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile -t ghcr.io/opensoha/soha-agent:test .
+docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile.hermes-agent-runner -t ghcr.io/opensoha/soha-hermes-agent:test .
+git diff --check
+```
+
+CI also runs `golangci-lint v2.9.0` with only-new-issues semantics. A missing local Docker or Kubernetes CLI prerequisite must be covered by the corresponding successful GitHub Actions job.
 
 ## References
 
