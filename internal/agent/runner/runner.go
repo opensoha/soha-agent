@@ -107,6 +107,12 @@ type Runner struct {
 	providerRegistry    *DynamicAgentProviderRegistry
 	providerConformance AgentProviderConformanceProbe
 	outpost             *outpostRuntime
+	manifestExecutor    ManifestExecutor
+	manifestClusterID   string
+}
+
+type ManifestExecutor interface {
+	ExecuteManifestTask(context.Context, sohaapi.ManifestExecutionTaskPayload) (sohaapi.ManifestExecutionTaskResult, error)
 }
 
 type ActiveTask struct {
@@ -213,6 +219,11 @@ func New(cfg cfgpkg.ControlPlaneConfig, logger *zap.Logger) *Runner {
 		metrics:          &runnerMetrics{},
 		providerRegistry: providerRegistry,
 	}
+}
+
+func (r *Runner) SetManifestExecutor(executor ManifestExecutor, clusterID string) {
+	r.manifestExecutor = executor
+	r.manifestClusterID = strings.TrimSpace(clusterID)
 }
 
 func (r *Runner) ApplyAgentProviderRegistrySnapshot(snapshot AgentProviderRegistry, now time.Time) AgentProviderRegistryApplyResult {
@@ -505,9 +516,13 @@ func (r *Runner) agentRuntimeLoop(ctx context.Context) {
 }
 
 func (r *Runner) claim(ctx context.Context) (ExecutionTask, bool) {
+	providerKinds := append([]string(nil), r.cfg.ProviderKinds...)
+	if r.manifestExecutor != nil && r.manifestClusterID != "" {
+		providerKinds = append(providerKinds, "manifest_agent."+r.manifestClusterID)
+	}
 	task, err := r.apiClient().ClaimExecutionTask(ctx, claimRequest{
 		AgentID:         firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent"),
-		ProviderKinds:   r.cfg.ProviderKinds,
+		ProviderKinds:   providerKinds,
 		RuntimeEndpoint: strings.TrimSpace(r.cfg.RuntimeEndpoint),
 	})
 	if err != nil {
@@ -569,6 +584,10 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 	taskCtx, cancelTask := r.executionTaskContext(ctx, task)
 	defer cancelTask()
 	r.metrics.markStarted(metricScopeExecution)
+	if strings.HasPrefix(task.TaskKind, "manifest_") {
+		r.executeManifestTask(taskCtx, task)
+		return
+	}
 	commands := extractCommands(task.Payload)
 	if len(commands) == 0 {
 		r.finalCallback(ctx, task, "failed", map[string]any{
@@ -1179,12 +1198,36 @@ func (r *Runner) executeComposeAction(ctx context.Context, operation DockerOpera
 	if err != nil {
 		return logs, err
 	}
+	buildWorkspace := ""
+	if strings.TrimSpace(fmt.Sprint(operation.Payload["sourceKind"])) == "git_dockerfile" {
+		buildLogs, workspace, buildErr := r.executeGitDockerfileBuild(ctx, dir, operation)
+		logs = append(logs, buildLogs...)
+		if buildErr != nil {
+			if cleanupErr := cleanupGitBuildWorkspace(workspace, true); cleanupErr != nil {
+				logs = append(logs, "git build workspace cleanup failed: "+cleanupErr.Error())
+			}
+			return logs, buildErr
+		}
+		buildWorkspace = workspace
+	}
 	args := composeArgsForAction(action)
 	if len(args) == 0 {
+		if cleanupErr := cleanupGitBuildWorkspace(buildWorkspace, true); cleanupErr != nil {
+			logs = append(logs, "git build workspace cleanup failed: "+cleanupErr.Error())
+		}
 		return logs, fmt.Errorf("unsupported compose action %q", action)
 	}
 	commandLogs, err := runCommand(ctx, dir, "docker", args...)
 	logs = append(logs, commandLogs...)
+	if buildWorkspace != "" {
+		if cleanupErr := cleanupGitBuildWorkspace(buildWorkspace, err != nil); cleanupErr != nil {
+			logs = append(logs, "git build workspace cleanup failed: "+cleanupErr.Error())
+		} else if err != nil {
+			logs = append(logs, "git build checkout cleaned; resolved commit retained")
+		} else {
+			logs = append(logs, "git build workspace cleaned")
+		}
+	}
 	return logs, err
 }
 
@@ -1429,14 +1472,15 @@ func (r *Runner) finalCallback(ctx context.Context, task ExecutionTask, status s
 }
 
 func (r *Runner) dockerCallback(ctx context.Context, operation DockerOperation, status string, payload map[string]any, logs []string) (DockerOperation, bool) {
+	redactedPayload, _ := redactAgentRuntimeValue(payload).(map[string]any)
 	var result DockerOperation
 	ok := r.withCallbackRetry(ctx, metricScopeDocker, status, func() error {
 		next, err := r.apiClient().RecordDockerOperationCallback(ctx, dockerCallbackRequest{
 			OperationID: operation.ID,
 			WorkerID:    dockerWorkerID(r.cfg),
 			Status:      status,
-			Payload:     payload,
-			Logs:        logs,
+			Payload:     redactedPayload,
+			Logs:        redactAgentRuntimeLogs(logs),
 		})
 		if err != nil {
 			return err

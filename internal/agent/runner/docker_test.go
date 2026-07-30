@@ -44,6 +44,187 @@ func TestPrepareComposeWorkspaceRemovesStaleEnvFileWhenEnvContentIsCleared(t *te
 	}
 }
 
+func TestExecuteComposeActionBuildsGitDockerfileBeforeStartingContainer(t *testing.T) {
+	binDir := t.TempDir()
+	gitPath := filepath.Join(binDir, "git")
+	gitScript := `#!/bin/sh
+set -eu
+case "$1" in
+  init)
+    mkdir -p .git
+    ;;
+  remote)
+    if [ "$2" = "get-url" ]; then
+      [ -f .origin ] || exit 1
+      echo "https://github.com/opensoha/example.git"
+    else
+      touch .origin
+    fi
+    ;;
+  fetch)
+    ;;
+  checkout)
+    mkdir -p deploy
+    printf 'FROM scratch\n' > deploy/Dockerfile
+    ;;
+  clean)
+    ;;
+  rev-parse)
+    echo "0123456789abcdef0123456789abcdef01234567"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`
+	//nolint:gosec // test creates temporary fake executables
+	if err := os.WriteFile(gitPath, []byte(gitScript), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	dockerCalls := filepath.Join(t.TempDir(), "docker-calls")
+	dockerPath := filepath.Join(binDir, "docker")
+	dockerScript := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$DOCKER_CALLS"
+`
+	//nolint:gosec // test creates temporary fake executables
+	if err := os.WriteFile(dockerPath, []byte(dockerScript), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_CALLS", dockerCalls)
+	root := t.TempDir()
+	runner := New(cfgpkg.ControlPlaneConfig{Docker: cfgpkg.DockerRunnerConfig{ComposeRoot: root}}, zap.NewNop())
+	operation := DockerOperation{
+		ID:        "operation-1",
+		ProjectID: "project-1",
+		Payload: map[string]any{
+			"action":         "deploy",
+			"sourceKind":     "git_dockerfile",
+			"projectSlug":    "preview-api",
+			"composeContent": "services:\n  api:\n    image: preview-api:git-main\n",
+			"image":          "preview-api:git-main",
+			"platform":       "linux/amd64",
+			"gitBuild": map[string]any{
+				"repositoryUrl":  "https://github.com/opensoha/example.git",
+				"ref":            "main",
+				"dockerfilePath": "deploy/Dockerfile",
+				"contextDir":     ".",
+				"pull":           true,
+			},
+		},
+	}
+
+	logs, err := runner.executeComposeAction(context.Background(), operation)
+	if err != nil {
+		t.Fatalf("executeComposeAction() error = %v logs=%v", err, logs)
+	}
+	callBytes, err := os.ReadFile(dockerCalls)
+	if err != nil {
+		t.Fatalf("read docker calls: %v", err)
+	}
+	calls := string(callBytes)
+	if !strings.Contains(calls, "build --file") || !strings.Contains(calls, "--tag preview-api:git-main") || !strings.Contains(calls, "--pull") || !strings.Contains(calls, "compose -f compose.yaml up -d") {
+		t.Fatalf("docker calls = %q, want build followed by compose up", calls)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "0123456789abcdef0123456789abcdef01234567") {
+		t.Fatalf("logs = %v, want resolved commit", logs)
+	}
+	if _, err := os.Stat(filepath.Join(root, "preview-api", ".soha-build", operation.ID)); !os.IsNotExist(err) {
+		t.Fatalf("git build workspace stat err = %v, want cleaned after successful start", err)
+	}
+}
+
+func TestExecuteComposeActionRemovesFailedGitCheckoutButRetainsResolvedCommit(t *testing.T) {
+	binDir := t.TempDir()
+	gitPath := filepath.Join(binDir, "git")
+	gitScript := `#!/bin/sh
+set -eu
+case "$1" in
+  init) mkdir -p .git ;;
+  remote)
+    if [ "$2" = "get-url" ]; then
+      [ -f .origin ] || exit 1
+    else
+      touch .origin
+    fi
+    ;;
+  fetch) ;;
+  checkout) printf 'FROM scratch\n' > Dockerfile ;;
+  clean) ;;
+  rev-parse) echo "0123456789abcdef0123456789abcdef01234567" ;;
+  *) exit 1 ;;
+esac
+`
+	//nolint:gosec // test creates temporary fake executables
+	if err := os.WriteFile(gitPath, []byte(gitScript), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	dockerPath := filepath.Join(binDir, "docker")
+	dockerScript := `#!/bin/sh
+exit 1
+`
+	//nolint:gosec // test creates temporary fake executables
+	if err := os.WriteFile(dockerPath, []byte(dockerScript), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	root := t.TempDir()
+	runner := New(cfgpkg.ControlPlaneConfig{Docker: cfgpkg.DockerRunnerConfig{ComposeRoot: root}}, zap.NewNop())
+	operation := DockerOperation{
+		ID: "operation-failed-build", ProjectID: "project-1",
+		Payload: map[string]any{
+			"action": "deploy", "sourceKind": "git_dockerfile", "projectSlug": "preview-api",
+			"composeContent": "services:\n  api:\n    image: preview-api:git-main\n", "image": "preview-api:git-main",
+			"gitBuild": map[string]any{"repositoryUrl": "https://github.com/opensoha/example.git", "ref": "main"},
+		},
+	}
+
+	if _, err := runner.executeComposeAction(context.Background(), operation); err == nil {
+		t.Fatal("executeComposeAction() error = nil, want failed Docker build")
+	}
+	buildRoot := filepath.Join(root, "preview-api", ".soha-build", operation.ID)
+	if _, err := os.Stat(filepath.Join(buildRoot, "repository")); !os.IsNotExist(err) {
+		t.Fatalf("repository checkout stat err = %v, want removed", err)
+	}
+	commit, err := os.ReadFile(filepath.Join(buildRoot, "resolved-commit"))
+	if err != nil {
+		t.Fatalf("read retained resolved commit: %v", err)
+	}
+	if strings.TrimSpace(string(commit)) != "0123456789abcdef0123456789abcdef01234567" {
+		t.Fatalf("resolved commit = %q, want pinned commit", commit)
+	}
+}
+
+func TestGitDockerfileBuildSpecRejectsCredentialsAndPathEscape(t *testing.T) {
+	tests := []DockerOperation{
+		{Payload: map[string]any{"image": "preview:git", "gitBuild": map[string]any{"repositoryUrl": "https://token@github.com/opensoha/example.git"}}},
+		{Payload: map[string]any{"image": "preview:git", "gitBuild": map[string]any{"repositoryUrl": "https://github.com/opensoha/example.git", "dockerfilePath": "../Dockerfile"}}},
+		{Payload: map[string]any{"image": "preview:git", "gitBuild": map[string]any{"repositoryUrl": "https://github.com/opensoha/example.git", "ref": "--upload-pack=evil"}}},
+	}
+	for index, operation := range tests {
+		if _, err := gitDockerfileBuildSpecFromOperation(operation); err == nil {
+			t.Fatalf("case %d: gitDockerfileBuildSpecFromOperation() error = nil, want rejection", index)
+		}
+	}
+}
+
+func TestExecuteGitDockerfileBuildRejectsBroadWorkspaceOperationID(t *testing.T) {
+	runner := New(cfgpkg.ControlPlaneConfig{}, zap.NewNop())
+	operation := DockerOperation{
+		ID: ".",
+		Payload: map[string]any{
+			"image": "preview:git",
+			"gitBuild": map[string]any{
+				"repositoryUrl": "https://github.com/opensoha/example.git",
+			},
+		},
+	}
+	if _, _, err := runner.executeGitDockerfileBuild(context.Background(), t.TempDir(), operation); err == nil {
+		t.Fatalf("executeGitDockerfileBuild() error = nil, want invalid operation id rejection")
+	}
+}
+
 func TestValidateDockerHostProvisionRequiresDockerRuntime(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	runner := New(cfgpkg.ControlPlaneConfig{}, zap.NewNop())

@@ -99,7 +99,7 @@ func (c *Client) Summary(_ context.Context) domaincluster.Summary {
 		return summary
 	}
 
-	capabilities := make([]string, 0, len(groups.Groups))
+	capabilities := []string{"manifest.preflight", "manifest.ssa", "manifest.observe"}
 	for _, group := range groups.Groups {
 		if strings.TrimSpace(group.Name) == "" {
 			continue
