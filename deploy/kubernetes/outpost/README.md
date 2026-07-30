@@ -36,5 +36,5 @@ Server and agent versions do not need identical SemVer values. Protocol `v1`, th
 Render and validate the artifact without a cluster:
 
 ```bash
-kubectl kustomize deploy/kubernetes/outpost | kubectl apply --dry-run=client -f -
+kubectl kustomize deploy/kubernetes/outpost | go run github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0 -kubernetes-version 1.34.1 -strict -summary -
 ```

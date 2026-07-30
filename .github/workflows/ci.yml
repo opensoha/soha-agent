@@ -55,12 +55,12 @@ jobs:
       - name: Build
         working-directory: soha-agent
         run: GOWORK=off CGO_ENABLED=0 go build -o /tmp/soha-agent ./cmd/agent
-      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-kubectl@v5
         with:
           version: v1.34.1
       - name: Validate Outpost Kubernetes artifact
         working-directory: soha-agent
-        run: kubectl kustomize deploy/kubernetes/outpost | kubectl apply --dry-run=client -f -
+        run: kubectl kustomize deploy/kubernetes/outpost | go run github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0 -kubernetes-version 1.34.1 -strict -summary -
       - name: Agent Docker build
         working-directory: soha-agent
         run: docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile -t ghcr.io/opensoha/soha-agent:test .
