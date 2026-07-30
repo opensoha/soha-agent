@@ -669,6 +669,7 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 			zap.String("workspace_path", workspacePath),
 		)
 		cmd := exec.CommandContext(commandCtx, "/bin/sh", "-lc", command)
+		configureCommandCancellation(cmd)
 		if commandDir != "" {
 			cmd.Dir = commandDir
 		}
@@ -1759,6 +1760,7 @@ func parseWorkspaceSpec(task ExecutionTask) workspaceSpec {
 
 func runCommand(ctx context.Context, dir, name string, args ...string) ([]string, error) {
 	command := exec.CommandContext(ctx, name, args...)
+	configureCommandCancellation(command)
 	if strings.TrimSpace(dir) != "" {
 		command.Dir = dir
 	}
