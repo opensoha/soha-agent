@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
+	apiresponse "github.com/opensoha/soha-agent/internal/api/response"
 )
 
 func registerPodStreamRoutes(platform *gin.RouterGroup, client *k8sagent.Client) {
@@ -15,6 +16,10 @@ func registerPodStreamRoutes(platform *gin.RouterGroup, client *k8sagent.Client)
 		namespace := c.DefaultQuery("namespace", "default")
 		tailLines := int64(parseLimit(c.Query("tailLines"), 200))
 		sinceSeconds := int64(parseLimit(c.Query("sinceSeconds"), 0))
+		if err := clearResponseWriteDeadline(c); err != nil {
+			apiresponse.Error(c, http.StatusInternalServerError, "stream_unavailable", "streaming response is unavailable")
+			return
+		}
 
 		c.Header("Content-Type", "text/plain; charset=utf-8")
 		c.Header("Cache-Control", "no-cache")

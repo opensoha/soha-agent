@@ -34,10 +34,10 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 	}
 	sort.Strings(signatures)
 	routeDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(signatures, "\n"))))
-	if len(signatures) != 136 {
-		t.Fatalf("route count = %d, want 136", len(signatures))
+	if len(signatures) != 138 {
+		t.Fatalf("route count = %d, want 138", len(signatures))
 	}
-	const expectedRouteDigest = "d9900b2fa1e7ac4b2f1798d05339ea18abaf3eb4290c4c7ab21be9e9be0b1695"
+	const expectedRouteDigest = "5fab963c9991ed254050bf80476774ba3155fb90701a9678fc3e560a4ccbc25d"
 	if routeDigest != expectedRouteDigest {
 		t.Fatalf("route digest = %s, want %s", routeDigest, expectedRouteDigest)
 	}
@@ -46,6 +46,8 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 		http.MethodGet + " /healthz",
 		http.MethodGet + " /api/v1/diagnostics",
 		http.MethodGet + " /api/v1/platform/workloads/pods",
+		http.MethodPost + " /api/v1/platform/logs/query",
+		http.MethodPost + " /api/v1/platform/logs/stream",
 		http.MethodGet + " /api/v1/platform/configuration/configmaps",
 		http.MethodGet + " /api/v1/platform/access-control/roles",
 		http.MethodGet + " /api/v1/platform/network/services",

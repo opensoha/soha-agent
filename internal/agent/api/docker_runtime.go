@@ -57,6 +57,7 @@ type dockerRuntimeRequest struct {
 	Config         map[string]any `json:"config,omitempty"`
 	ServiceName    string         `json:"serviceName,omitempty"`
 	TailLines      int            `json:"tailLines,omitempty"`
+	SinceSeconds   int64          `json:"sinceSeconds,omitempty"`
 	Target         string         `json:"target,omitempty"`
 	Path           string         `json:"path,omitempty"`
 	Limit          int            `json:"limit,omitempty"`
@@ -123,7 +124,7 @@ func handleDockerRuntimeLogs(c *gin.Context) {
 	defer cleanup()
 
 	tailLines := normalizeDockerRuntimeTailLines(req.TailLines)
-	output, err := runDockerRuntimeCommand(c.Request.Context(), workspace.Dir, append(dockerRuntimeComposeArgs(workspace, "logs", "--tail", strconv.Itoa(tailLines)), req.ServiceName)...)
+	output, err := runDockerRuntimeCommand(c.Request.Context(), workspace.Dir, dockerRuntimeLogArgs(workspace, req, false)...)
 	if err != nil {
 		dockerRuntimeWriteError(c, err)
 		return
@@ -158,8 +159,7 @@ func handleDockerRuntimeLogStream(c *gin.Context) {
 	c.Status(http.StatusOK)
 	flusher, _ := c.Writer.(http.Flusher)
 	writer := dockerRuntimeFlushWriter{writer: c.Writer, flusher: flusher}
-	tailLines := normalizeDockerRuntimeTailLines(req.TailLines)
-	args := append(dockerRuntimeComposeArgs(workspace, "logs", "-f", "--tail", strconv.Itoa(tailLines)), req.ServiceName)
+	args := dockerRuntimeLogArgs(workspace, req, true)
 	if err := streamDockerRuntimeCommand(c.Request.Context(), workspace.Dir, writer, writer, args...); err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintf(writer, "\n[docker-runtime] %s\n", dockerRuntimeStreamFailedMessage)
 	}
@@ -384,6 +384,9 @@ func validateDockerRuntimeRequest(req dockerRuntimeRequest) error {
 	if !dockerRuntimeServiceNamePattern.MatchString(strings.TrimSpace(req.ServiceName)) {
 		return errors.New("serviceName is invalid")
 	}
+	if req.SinceSeconds < 0 || req.SinceSeconds > 604800 {
+		return errors.New("sinceSeconds is outside the supported range")
+	}
 	services := dockerRuntimeComposeServiceNames(req.ComposeContent)
 	if len(services) > 0 && !slices.Contains(services, strings.TrimSpace(req.ServiceName)) {
 		return fmt.Errorf("serviceName %s is not defined in compose", req.ServiceName)
@@ -417,6 +420,18 @@ func prepareDockerRuntimeWorkspace(req dockerRuntimeRequest) (dockerRuntimeWorks
 func dockerRuntimeComposeArgs(workspace dockerRuntimeWorkspace, args ...string) []string {
 	base := []string{"compose", "-p", workspace.ProjectName, "-f", "compose.yaml"}
 	return append(base, args...)
+}
+
+func dockerRuntimeLogArgs(workspace dockerRuntimeWorkspace, req dockerRuntimeRequest, follow bool) []string {
+	args := []string{"logs", "--timestamps", "--no-color", "--tail", strconv.Itoa(normalizeDockerRuntimeTailLines(req.TailLines))}
+	if follow {
+		args = append(args, "--follow")
+	}
+	if req.SinceSeconds > 0 {
+		args = append(args, "--since", strconv.FormatInt(req.SinceSeconds, 10)+"s")
+	}
+	args = append(args, req.ServiceName)
+	return dockerRuntimeComposeArgs(workspace, args...)
 }
 
 func runDockerRuntimeCommand(ctx context.Context, dir string, args ...string) ([]byte, error) {

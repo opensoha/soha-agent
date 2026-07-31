@@ -13,6 +13,16 @@ import (
 	"go.uber.org/zap"
 )
 
+func TestDockerRuntimeLogArgsIncludeTimestampAndSince(t *testing.T) {
+	args := dockerRuntimeLogArgs(dockerRuntimeWorkspace{ProjectName: "demo"}, dockerRuntimeRequest{ServiceName: "api", TailLines: 50, SinceSeconds: 90}, true)
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{"--timestamps", "--no-color", "--tail 50", "--follow", "--since 90s", "api"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("args = %q, missing %q", joined, expected)
+		}
+	}
+}
+
 func TestDockerRuntimeRoutesRequireConfiguredToken(t *testing.T) {
 	router := dockerRuntimeTestRouter(cfgpkg.Config{
 		HTTP: cfgpkg.HTTPConfig{BasePath: "/api/v1"},

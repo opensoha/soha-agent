@@ -90,6 +90,7 @@ func registerPlatformRoutes(router *gin.Engine, cfg cfgpkg.Config, client *k8sag
 	)
 	registerHelmRoutes(platform, client, actions)
 	registerPodStreamRoutes(platform, client)
+	registerAggregateLogRoutes(platform, client)
 	registerPodTerminalRoutes(platform, client, actions, origins)
 	registerPlatformInventoryRoutes(platform, client)
 	registerPlatformWorkloadRoutes(platform, client, actions)
