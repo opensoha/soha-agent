@@ -44,7 +44,7 @@ func TestPrepareComposeWorkspaceRemovesStaleEnvFileWhenEnvContentIsCleared(t *te
 	}
 }
 
-func TestExecuteComposeActionBuildsGitDockerfileBeforeStartingContainer(t *testing.T) {
+func TestExecuteComposeActionBuildsGitDockerfileBeforeRecreatingContainer(t *testing.T) {
 	binDir := t.TempDir()
 	gitPath := filepath.Join(binDir, "git")
 	gitScript := `#!/bin/sh
@@ -99,7 +99,7 @@ printf '%s\n' "$*" >> "$DOCKER_CALLS"
 		ID:        "operation-1",
 		ProjectID: "project-1",
 		Payload: map[string]any{
-			"action":         "deploy",
+			"action":         "redeploy",
 			"sourceKind":     "git_dockerfile",
 			"projectSlug":    "preview-api",
 			"composeContent": "services:\n  api:\n    image: preview-api:git-main\n",
@@ -124,14 +124,96 @@ printf '%s\n' "$*" >> "$DOCKER_CALLS"
 		t.Fatalf("read docker calls: %v", err)
 	}
 	calls := string(callBytes)
-	if !strings.Contains(calls, "build --file") || !strings.Contains(calls, "--tag preview-api:git-main") || !strings.Contains(calls, "--pull") || !strings.Contains(calls, "compose -f compose.yaml up -d") {
-		t.Fatalf("docker calls = %q, want build followed by compose up", calls)
+	buildIndex := strings.Index(calls, "build --file")
+	downIndex := strings.Index(calls, "compose -f compose.yaml down --remove-orphans")
+	upIndex := strings.Index(calls, "compose -f compose.yaml up -d --force-recreate")
+	if buildIndex < 0 || downIndex <= buildIndex || upIndex <= downIndex || !strings.Contains(calls, "--tag preview-api:git-main") || !strings.Contains(calls, "--pull") {
+		t.Fatalf("docker calls = %q, want Git build followed by compose down and force-recreate", calls)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "0123456789abcdef0123456789abcdef01234567") {
 		t.Fatalf("logs = %v, want resolved commit", logs)
 	}
 	if _, err := os.Stat(filepath.Join(root, "preview-api", ".soha-build", operation.ID)); !os.IsNotExist(err) {
 		t.Fatalf("git build workspace stat err = %v, want cleaned after successful start", err)
+	}
+}
+
+func TestExecuteComposeActionPullsImageBeforeRecreatingContainer(t *testing.T) {
+	binDir := t.TempDir()
+	dockerCalls := filepath.Join(t.TempDir(), "docker-calls")
+	dockerPath := filepath.Join(binDir, "docker")
+	dockerScript := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$DOCKER_CALLS"
+`
+	//nolint:gosec // test creates a temporary fake executable
+	if err := os.WriteFile(dockerPath, []byte(dockerScript), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_CALLS", dockerCalls)
+	runner := New(cfgpkg.ControlPlaneConfig{Docker: cfgpkg.DockerRunnerConfig{ComposeRoot: t.TempDir()}}, zap.NewNop())
+	operation := DockerOperation{
+		ID: "operation-image-redeploy", ProjectID: "project-1",
+		Payload: map[string]any{
+			"action": "redeploy", "sourceKind": "single_container", "projectSlug": "preview-api",
+			"composeContent": "services:\n  api:\n    image: nginx:alpine\n",
+		},
+	}
+
+	logs, err := runner.executeComposeAction(context.Background(), operation)
+	if err != nil {
+		t.Fatalf("executeComposeAction() error = %v logs=%v", err, logs)
+	}
+	callBytes, err := os.ReadFile(dockerCalls)
+	if err != nil {
+		t.Fatalf("read docker calls: %v", err)
+	}
+	calls := string(callBytes)
+	pullIndex := strings.Index(calls, "compose -f compose.yaml pull")
+	downIndex := strings.Index(calls, "compose -f compose.yaml down --remove-orphans")
+	upIndex := strings.Index(calls, "compose -f compose.yaml up -d --force-recreate")
+	if pullIndex < 0 || downIndex <= pullIndex || upIndex <= downIndex {
+		t.Fatalf("docker calls = %q, want pull followed by down and force-recreate", calls)
+	}
+}
+
+func TestExecuteComposeActionDoesNotDestroyContainerWhenImagePullFails(t *testing.T) {
+	binDir := t.TempDir()
+	dockerCalls := filepath.Join(t.TempDir(), "docker-calls")
+	dockerPath := filepath.Join(binDir, "docker")
+	dockerScript := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$DOCKER_CALLS"
+case "$*" in
+  *" compose -f compose.yaml pull"|"compose -f compose.yaml pull") exit 1 ;;
+esac
+`
+	//nolint:gosec // test creates a temporary fake executable
+	if err := os.WriteFile(dockerPath, []byte(dockerScript), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_CALLS", dockerCalls)
+	runner := New(cfgpkg.ControlPlaneConfig{Docker: cfgpkg.DockerRunnerConfig{ComposeRoot: t.TempDir()}}, zap.NewNop())
+	operation := DockerOperation{
+		ID: "operation-image-pull-failed", ProjectID: "project-1",
+		Payload: map[string]any{
+			"action": "redeploy", "sourceKind": "single_container", "projectSlug": "preview-api",
+			"composeContent": "services:\n  api:\n    image: nginx:alpine\n",
+		},
+	}
+
+	if _, err := runner.executeComposeAction(context.Background(), operation); err == nil {
+		t.Fatal("executeComposeAction() error = nil, want pull failure")
+	}
+	callBytes, err := os.ReadFile(dockerCalls)
+	if err != nil {
+		t.Fatalf("read docker calls: %v", err)
+	}
+	calls := string(callBytes)
+	if strings.Contains(calls, " down ") || strings.Contains(calls, " up ") {
+		t.Fatalf("docker calls = %q, current container must remain running after pull failure", calls)
 	}
 }
 

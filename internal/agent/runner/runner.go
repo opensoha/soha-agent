@@ -1198,6 +1198,9 @@ func (r *Runner) executeComposeAction(ctx context.Context, operation DockerOpera
 	if err != nil {
 		return logs, err
 	}
+	if action == "redeploy" && isSingleContainerSource(operation) {
+		return r.executeSingleContainerRedeploy(ctx, dir, operation, logs)
+	}
 	buildWorkspace := ""
 	if strings.TrimSpace(fmt.Sprint(operation.Payload["sourceKind"])) == "git_dockerfile" {
 		buildLogs, workspace, buildErr := r.executeGitDockerfileBuild(ctx, dir, operation)
@@ -1219,16 +1222,53 @@ func (r *Runner) executeComposeAction(ctx context.Context, operation DockerOpera
 	}
 	commandLogs, err := runCommand(ctx, dir, "docker", args...)
 	logs = append(logs, commandLogs...)
-	if buildWorkspace != "" {
-		if cleanupErr := cleanupGitBuildWorkspace(buildWorkspace, err != nil); cleanupErr != nil {
-			logs = append(logs, "git build workspace cleanup failed: "+cleanupErr.Error())
-		} else if err != nil {
-			logs = append(logs, "git build checkout cleaned; resolved commit retained")
-		} else {
-			logs = append(logs, "git build workspace cleaned")
+	logs = appendGitBuildCleanupLogs(logs, buildWorkspace, err != nil)
+	return logs, err
+}
+
+func (r *Runner) executeSingleContainerRedeploy(ctx context.Context, dir string, operation DockerOperation, logs []string) ([]string, error) {
+	buildWorkspace := ""
+	if strings.TrimSpace(fmt.Sprint(operation.Payload["sourceKind"])) == "git_dockerfile" {
+		buildLogs, workspace, err := r.executeGitDockerfileBuild(ctx, dir, operation)
+		logs = append(logs, buildLogs...)
+		if err != nil {
+			return appendGitBuildCleanupLogs(logs, workspace, true), err
+		}
+		buildWorkspace = workspace
+	} else {
+		pullLogs, err := runCommand(ctx, dir, "docker", "compose", "-f", "compose.yaml", "pull")
+		logs = append(logs, pullLogs...)
+		if err != nil {
+			return logs, err
 		}
 	}
-	return logs, err
+
+	downLogs, err := runCommand(ctx, dir, "docker", "compose", "-f", "compose.yaml", "down", "--remove-orphans")
+	logs = append(logs, downLogs...)
+	if err != nil {
+		return appendGitBuildCleanupLogs(logs, buildWorkspace, true), err
+	}
+	upLogs, err := runCommand(ctx, dir, "docker", "compose", "-f", "compose.yaml", "up", "-d", "--force-recreate")
+	logs = append(logs, upLogs...)
+	return appendGitBuildCleanupLogs(logs, buildWorkspace, err != nil), err
+}
+
+func isSingleContainerSource(operation DockerOperation) bool {
+	sourceKind := strings.TrimSpace(fmt.Sprint(operation.Payload["sourceKind"]))
+	return sourceKind == "single_container" || sourceKind == "git_dockerfile"
+}
+
+func appendGitBuildCleanupLogs(logs []string, workspace string, preserveResolvedCommit bool) []string {
+	if workspace == "" {
+		return logs
+	}
+	if err := cleanupGitBuildWorkspace(workspace, preserveResolvedCommit); err != nil {
+		return append(logs, "git build workspace cleanup failed: "+err.Error())
+	}
+	if preserveResolvedCommit {
+		return append(logs, "git build checkout cleaned; resolved commit retained")
+	}
+	return append(logs, "git build workspace cleaned")
 }
 
 func (r *Runner) executeComposeServiceAction(ctx context.Context, operation DockerOperation) ([]string, error) {
