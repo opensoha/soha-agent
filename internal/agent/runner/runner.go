@@ -581,9 +581,18 @@ func (r *Runner) claimDockerOperation(ctx context.Context) (DockerOperation, boo
 }
 
 func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
+	agentID := firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent")
+	r.metrics.markStarted(metricScopeExecution)
+	secretCtx, err := r.redeemSecretLease(ctx, task.SecretLease, agentID)
+	if err != nil {
+		r.finalCallback(ctx, task, "failed", map[string]any{"error": err.Error(), "logs": []string{err.Error()}, "agentId": agentID})
+		r.metrics.markOutcome(metricScopeExecution, "failed")
+		return
+	}
+	task.SecretLease = nil
+	ctx = secretCtx
 	taskCtx, cancelTask := r.executionTaskContext(ctx, task)
 	defer cancelTask()
-	r.metrics.markStarted(metricScopeExecution)
 	if strings.HasPrefix(task.TaskKind, "manifest_") {
 		r.executeManifestTask(taskCtx, task)
 		return
@@ -598,7 +607,6 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 		return
 	}
 
-	agentID := firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent")
 	logs := make([]string, 0, len(commands)*3)
 	commandCount := len(commands)
 	r.registerActiveTask(task, cancelTask)
@@ -689,6 +697,9 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 		)
 		cmd := exec.CommandContext(commandCtx, "/bin/sh", "-lc", command)
 		configureCommandCancellation(cmd)
+		if environment := secretEnvironment(commandCtx); environment != nil {
+			cmd.Env = environment
+		}
 		if commandDir != "" {
 			cmd.Dir = commandDir
 		}
@@ -845,6 +856,11 @@ func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOpe
 		r.metrics.markOutcome(metricScopeDocker, "denied")
 		return
 	}
+	if err := validateDockerOperationPayload(operation); err != nil {
+		r.dockerCallback(ctx, operation, "failed", dockerRuntimePayload(ctx, r.cfg, map[string]any{"error": err.Error(), "workerId": workerID}), []string{"docker operation payload rejected: " + err.Error()})
+		r.metrics.markOutcome(metricScopeDocker, "denied")
+		return
+	}
 	timeoutSeconds := operation.TimeoutSeconds
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 1800
@@ -852,9 +868,12 @@ func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOpe
 	taskCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 	logs := []string{fmt.Sprintf("docker operation %s started: %s", operation.ID, operation.OperationKind)}
-	r.dockerCallback(taskCtx, operation, "running", dockerRuntimePayload(taskCtx, r.cfg, map[string]any{
+	if remote, ok := r.dockerCallback(taskCtx, operation, "running", dockerRuntimePayload(taskCtx, r.cfg, map[string]any{
 		"heartbeatAt": time.Now().UTC().Format(time.RFC3339),
-	}), logs)
+	}), logs); ok && shouldStopLocalExecution(remote.Status) {
+		r.metrics.markOutcome(metricScopeDocker, strings.TrimSpace(remote.Status))
+		return
+	}
 
 	done := make(chan struct{})
 	stopReason := make(chan string, 1)
@@ -959,6 +978,14 @@ func (r *Runner) executeAgentRun(ctx context.Context, run AgentRun) {
 	workerID := agentRuntimeWorkerID(r.cfg)
 	startedAt := time.Now().UTC()
 	r.metrics.markStarted(metricScopeAgentRuntime)
+	secretCtx, err := r.redeemSecretLease(ctx, run.SecretLease, workerID)
+	if err != nil {
+		r.agentRunCallback(ctx, run, "failed", map[string]any{"agentId": workerID, "workerId": workerID, "error": err.Error()}, nil, nil, "", err.Error())
+		r.metrics.markOutcome(metricScopeAgentRuntime, "failed")
+		return
+	}
+	run.SecretLease = nil
+	ctx = secretCtx
 	if remoteRun, ok := r.agentRunCallback(ctx, run, "running", map[string]any{
 		"agentId":     firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent"),
 		"workerId":    workerID,
@@ -1483,6 +1510,7 @@ func (r *Runner) CancelActiveTask(taskID, reason string) bool {
 }
 
 func (r *Runner) callback(ctx context.Context, task ExecutionTask, status string, payload map[string]any) (ExecutionTask, bool) {
+	payload, _ = redactResolvedSecretValues(ctx, redactAgentRuntimeValue(payload)).(map[string]any)
 	var result ExecutionTask
 	ok := r.withCallbackRetry(ctx, metricScopeExecution, status, func() error {
 		next, err := r.apiClient().RecordExecutionCallback(ctx, callbackRequest{
@@ -1506,7 +1534,7 @@ func (r *Runner) callback(ctx context.Context, task ExecutionTask, status string
 }
 
 func (r *Runner) finalCallback(ctx context.Context, task ExecutionTask, status string, payload map[string]any) (ExecutionTask, bool) {
-	finalCtx, cancel := r.finalCallbackContext()
+	finalCtx, cancel := r.finalCallbackContext(ctx)
 	defer cancel()
 	return r.callback(finalCtx, task, status, payload)
 }
@@ -1538,6 +1566,11 @@ func (r *Runner) dockerCallback(ctx context.Context, operation DockerOperation, 
 }
 
 func (r *Runner) agentRunCallback(ctx context.Context, run AgentRun, status string, payload map[string]any, toolExecutions []map[string]any, analysisArtifacts []map[string]any, externalRunID string, errorMessage string) (AgentRun, bool) {
+	payload, _ = redactResolvedSecretValues(ctx, redactAgentRuntimeValue(payload)).(map[string]any)
+	toolExecutions, _ = redactResolvedSecretValues(ctx, redactAgentRuntimeValue(toolExecutions)).([]map[string]any)
+	analysisArtifacts, _ = redactResolvedSecretValues(ctx, redactAgentRuntimeValue(analysisArtifacts)).([]map[string]any)
+	externalRunID, _ = redactResolvedSecretValues(ctx, redactAgentRuntimeText(externalRunID)).(string)
+	errorMessage, _ = redactResolvedSecretValues(ctx, redactAgentRuntimeText(errorMessage)).(string)
 	var result AgentRun
 	ok := r.withCallbackRetry(ctx, metricScopeAgentRuntime, status, func() error {
 		next, err := r.apiClient().RecordAgentRunCallback(ctx, agentRunCallbackRequest{
@@ -1627,7 +1660,7 @@ func (r *Runner) withCallbackRetry(ctx context.Context, scope, status string, ca
 	return false
 }
 
-func (r *Runner) finalCallbackContext() (context.Context, context.CancelFunc) {
+func (r *Runner) finalCallbackContext(parent context.Context) (context.Context, context.CancelFunc) {
 	timeout := r.cfg.CallbackRetry.Backoff
 	if timeout <= 0 {
 		timeout = 500 * time.Millisecond
@@ -1639,7 +1672,7 @@ func (r *Runner) finalCallbackContext() (context.Context, context.CancelFunc) {
 	if timeout > 30*time.Second {
 		timeout = 30 * time.Second
 	}
-	return context.WithTimeout(context.Background(), timeout)
+	return context.WithTimeout(context.WithoutCancel(parent), timeout)
 }
 
 func (r *Runner) executionTaskContext(ctx context.Context, task ExecutionTask) (context.Context, context.CancelFunc) {
@@ -1845,6 +1878,9 @@ func parseWorkspaceSpec(task ExecutionTask) workspaceSpec {
 func runCommand(ctx context.Context, dir, name string, args ...string) ([]string, error) {
 	command := exec.CommandContext(ctx, name, args...)
 	configureCommandCancellation(command)
+	if environment := secretEnvironment(ctx); environment != nil {
+		command.Env = environment
+	}
 	if strings.TrimSpace(dir) != "" {
 		command.Dir = dir
 	}

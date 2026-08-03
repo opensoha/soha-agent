@@ -2,14 +2,62 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
 	"go.uber.org/zap"
 )
+
+func TestDockerOperationPayloadRequiresTypedComposeFields(t *testing.T) {
+	tests := []DockerOperation{
+		{OperationKind: "project_deploy", Payload: map[string]any{"action": 7, "composeContent": "services: {}"}},
+		{OperationKind: "project_deploy", Payload: map[string]any{"action": "exec", "composeContent": "services: {}"}},
+		{OperationKind: "service_action", Payload: map[string]any{"action": "restart", "composeContent": "services: {}"}},
+	}
+	for index, operation := range tests {
+		if err := validateDockerOperationPayload(operation); err == nil {
+			t.Fatalf("case %d: validateDockerOperationPayload() error = nil, want rejection", index)
+		}
+	}
+	valid := DockerOperation{OperationKind: "project_deploy", Payload: map[string]any{"action": "deploy", "composeContent": "services: {}"}}
+	if err := validateDockerOperationPayload(valid); err != nil {
+		t.Fatalf("validateDockerOperationPayload(valid) error = %v", err)
+	}
+}
+
+func TestDockerOperationStopsWhenInitialCallbackReturnsTerminalState(t *testing.T) {
+	operation := DockerOperation{ID: "operation-completed", OperationKind: "project_deploy", Status: "queued", Payload: map[string]any{"action": "deploy", "composeContent": "services: {}"}}
+	callbackCount := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/docker/operation-callbacks" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var req dockerCallbackRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode callback: %v", err)
+		}
+		callbackCount++
+		terminal := operation
+		terminal.Status = "completed"
+		return jsonResponse(t, http.StatusAccepted, map[string]any{"data": terminal}), nil
+	})
+	runner := New(cfgpkg.ControlPlaneConfig{
+		BaseURL: "http://control-plane", BearerToken: "runner-token",
+		CallbackRetry: cfgpkg.CallbackRetryConfig{MaxAttempts: 1, Backoff: time.Millisecond},
+		Docker:        cfgpkg.DockerRunnerConfig{OperationKinds: []string{"project_deploy"}, ComposeRoot: t.TempDir()},
+	}, zap.NewNop())
+	runner.httpClient = &http.Client{Transport: transport}
+	runner.executeDockerOperation(context.Background(), operation)
+	if callbackCount != 1 {
+		t.Fatalf("callback count = %d, want one terminal-state check", callbackCount)
+	}
+}
 
 func TestPrepareComposeWorkspaceRemovesStaleEnvFileWhenEnvContentIsCleared(t *testing.T) {
 	root := t.TempDir()
