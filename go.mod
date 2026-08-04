@@ -7,7 +7,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
-	github.com/opensoha/soha-contracts v0.1.3
+	github.com/opensoha/soha-contracts v0.1.5
 	github.com/spf13/viper v1.20.1
 	go.uber.org/zap v1.27.0
 	helm.sh/helm/v4 v4.1.4
@@ -16,8 +16,6 @@ require (
 	k8s.io/client-go v0.35.1
 	sigs.k8s.io/yaml v1.6.0
 )
-
-replace github.com/opensoha/soha-contracts v0.1.3 => ../soha-contracts
 
 require (
 	dario.cat/mergo v1.0.1 // indirect
