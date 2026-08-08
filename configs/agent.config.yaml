@@ -66,6 +66,12 @@ control_plane:
   provider_kinds:
     - ci_agent_runner
   workspace_root: .
+  session:
+    enabled: false
+    reconnect_min: 1s
+    reconnect_max: 30s
+    handshake_timeout: 15s
+    max_streams: 64
   docker:
     enabled: true
     worker_id: local-docker-runner

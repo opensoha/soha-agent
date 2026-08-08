@@ -9,15 +9,17 @@ import (
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
 	loggerpkg "github.com/opensoha/soha-agent/internal/agent/logger"
 	runnerpkg "github.com/opensoha/soha-agent/internal/agent/runner"
+	sessionpkg "github.com/opensoha/soha-agent/internal/agent/session"
 	"go.uber.org/zap"
 )
 
 type App struct {
-	Config cfgpkg.Config
-	Logger *zap.Logger
-	Server *agentapi.Server
-	Runner *runnerpkg.Runner
-	cancel context.CancelFunc
+	Config  cfgpkg.Config
+	Logger  *zap.Logger
+	Server  *agentapi.Server
+	Runner  *runnerpkg.Runner
+	Session *sessionpkg.Manager
+	cancel  context.CancelFunc
 }
 
 func New(ctx context.Context) (*App, error) {
@@ -61,7 +63,13 @@ func New(ctx context.Context) (*App, error) {
 	}
 	runner.Start(lifecycleCtx)
 	server := agentapi.New(cfg, logger, client, runner)
-	return &App{Config: cfg, Logger: logger, Server: server, Runner: runner, cancel: cancel}, nil
+	sessionManager, err := sessionpkg.New(controlPlane, logger)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("build Agent session: %w", err)
+	}
+	sessionManager.Start(lifecycleCtx)
+	return &App{Config: cfg, Logger: logger, Server: server, Runner: runner, Session: sessionManager, cancel: cancel}, nil
 }
 
 func (a *App) Run() error {

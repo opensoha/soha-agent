@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -72,6 +73,15 @@ type ControlPlaneConfig struct {
 	Docker          DockerRunnerConfig  `mapstructure:"docker"`
 	AgentRuntime    AgentRuntimeConfig  `mapstructure:"agent_runtime"`
 	Outpost         OutpostConfig       `mapstructure:"outpost"`
+	Session         SessionConfig       `mapstructure:"session"`
+}
+
+type SessionConfig struct {
+	Enabled          bool          `mapstructure:"enabled"`
+	ReconnectMin     time.Duration `mapstructure:"reconnect_min"`
+	ReconnectMax     time.Duration `mapstructure:"reconnect_max"`
+	HandshakeTimeout time.Duration `mapstructure:"handshake_timeout"`
+	MaxStreams       int           `mapstructure:"max_streams"`
 }
 
 type OutpostConfig struct {
@@ -199,9 +209,9 @@ func Validate(cfg Config) error {
 		if err := validateProductionAllowedActions(cfg.Security.AllowedActions, cfg.HTTP.AllowedOrigins); err != nil {
 			return err
 		}
-		if cfg.ControlPlane.Enabled {
+		if cfg.ControlPlane.Enabled || cfg.ControlPlane.Session.Enabled {
 			if err := validateProductionToken("control_plane.bearer_token", cfg.ControlPlane.BearerToken); err != nil {
-				return fmt.Errorf("%s when control_plane.enabled is true", err.Error())
+				return fmt.Errorf("%s when the control plane or Agent session is enabled", err.Error())
 			}
 		}
 		if cfg.ControlPlane.Docker.Enabled && len(normalizeStringList(cfg.ControlPlane.Docker.OperationKinds)) == 0 {
@@ -218,7 +228,34 @@ func Validate(cfg Config) error {
 			}
 		}
 	}
+	if err := validateAgentSessionConfig(cfg.ControlPlane); err != nil {
+		return err
+	}
 	return validateOutpostConfig(cfg.ControlPlane)
+}
+
+func validateAgentSessionConfig(controlPlane ControlPlaneConfig) error {
+	if !controlPlane.Session.Enabled {
+		return nil
+	}
+	baseURL, err := url.Parse(strings.TrimSpace(controlPlane.BaseURL))
+	if err != nil || baseURL.Host == "" || (baseURL.Scheme != "http" && baseURL.Scheme != "https") {
+		return fmt.Errorf("control_plane.base_url must be an absolute http or https URL when Agent session is enabled")
+	}
+	if strings.TrimSpace(controlPlane.AgentID) == "" || strings.TrimSpace(controlPlane.BearerToken) == "" {
+		return fmt.Errorf("control_plane.agent_id and bearer_token are required when Agent session is enabled")
+	}
+	runtimeURL, err := url.Parse(strings.TrimSpace(controlPlane.RuntimeEndpoint))
+	if err != nil || runtimeURL.Host == "" || runtimeURL.Scheme != "http" {
+		return fmt.Errorf("control_plane.runtime_endpoint must be an absolute http URL when Agent session is enabled")
+	}
+	if controlPlane.Session.ReconnectMin <= 0 || controlPlane.Session.ReconnectMax < controlPlane.Session.ReconnectMin {
+		return fmt.Errorf("control_plane.session reconnect bounds are invalid")
+	}
+	if controlPlane.Session.HandshakeTimeout <= 0 || controlPlane.Session.MaxStreams <= 0 {
+		return fmt.Errorf("control_plane.session handshake_timeout and max_streams must be positive")
+	}
+	return nil
 }
 
 func validateOutpostConfig(controlPlane ControlPlaneConfig) error {
@@ -297,6 +334,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("control_plane.outpost.trust_public_key", "")
 	v.SetDefault("control_plane.outpost.poll_interval", "5s")
 	v.SetDefault("control_plane.outpost.heartbeat_interval", "15s")
+	v.SetDefault("control_plane.session.enabled", false)
+	v.SetDefault("control_plane.session.reconnect_min", "1s")
+	v.SetDefault("control_plane.session.reconnect_max", "30s")
+	v.SetDefault("control_plane.session.handshake_timeout", "15s")
+	v.SetDefault("control_plane.session.max_streams", 64)
 	v.SetDefault("kubernetes.enabled", true)
 	v.SetDefault("kubernetes.id", "local-agent")
 	v.SetDefault("kubernetes.name", "Local Agent")

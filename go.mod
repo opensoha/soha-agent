@@ -7,6 +7,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+	github.com/hashicorp/yamux v0.1.2
 	github.com/opensoha/soha-contracts v0.1.5
 	github.com/spf13/viper v1.20.1
 	go.uber.org/zap v1.27.0

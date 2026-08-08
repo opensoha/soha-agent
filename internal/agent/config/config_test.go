@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -109,6 +110,24 @@ func TestValidateRequiresProductionControlPlaneToken(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Validate() succeeded, want control plane token error")
+	}
+}
+
+func TestValidateAgentSession(t *testing.T) {
+	base := Config{
+		HTTP: HTTPConfig{Addr: "127.0.0.1:18080"},
+		ControlPlane: ControlPlaneConfig{
+			BaseURL: "https://soha.example.com", BearerToken: productionControlPlaneToken,
+			AgentID: "cluster-a", RuntimeEndpoint: "http://127.0.0.1:18080",
+			Session: SessionConfig{Enabled: true, ReconnectMin: time.Second, ReconnectMax: 30 * time.Second, HandshakeTimeout: 15 * time.Second, MaxStreams: 64},
+		},
+	}
+	if err := Validate(base); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	base.ControlPlane.BaseURL = "wss://soha.example.com"
+	if err := Validate(base); err == nil || !strings.Contains(err.Error(), "http or https") {
+		t.Fatalf("Validate(wss) error = %v", err)
 	}
 }
 
@@ -280,6 +299,44 @@ func TestLoadUsesExplicitConfigFile(t *testing.T) {
 	}
 	if cfg.App.Name != "custom-agent" {
 		t.Fatalf("App.Name = %q, want custom-agent", cfg.App.Name)
+	}
+}
+
+func TestLoadUsesEnvironmentBearerTokens(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.config.yaml")
+	config := `app:
+  env: production
+http:
+  addr: :18080
+auth:
+  bearer_token: ""
+control_plane:
+  base_url: http://soha.example.com
+  bearer_token: ""
+  agent_id: cluster-a
+  runtime_endpoint: http://127.0.0.1:18080
+  session:
+    enabled: true
+kubernetes:
+  enabled: false
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	t.Setenv("SOHA_AGENT_CONFIG_FILE", path)
+	t.Setenv("SOHA_AGENT_AUTH_BEARER_TOKEN", productionAgentToken)
+	t.Setenv("SOHA_AGENT_CONTROL_PLANE_BEARER_TOKEN", productionControlPlaneToken)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Auth.BearerToken != productionAgentToken {
+		t.Fatalf("Auth.BearerToken was not loaded from the environment")
+	}
+	if cfg.ControlPlane.BearerToken != productionControlPlaneToken {
+		t.Fatalf("ControlPlane.BearerToken was not loaded from the environment")
 	}
 }
 

@@ -69,6 +69,25 @@ control_plane:
     backoff: 500ms
 ```
 
+Kubernetes cluster Agents can initiate a reverse session to a publicly reachable Soha access URL. This mode does not require a Service, NodePort, or inbound route to the Agent:
+
+```yaml
+control_plane:
+  enabled: false
+  base_url: https://soha.example.com
+  bearer_token: REPLACE_WITH_CLUSTER_AGENT_TOKEN
+  agent_id: cluster-id
+  runtime_endpoint: http://127.0.0.1:18080
+  session:
+    enabled: true
+    reconnect_min: 1s
+    reconnect_max: 30s
+    handshake_timeout: 15s
+    max_streams: 64
+```
+
+The Soha-generated `kubectl apply -f <access-url>/.../manifest.yaml` manifest provisions these values and the per-cluster token. Do not reuse that token across clusters.
+
 Runtime metrics are available from `GET /api/v1/runtime/metrics` when the runner is enabled.
 Local diagnostics are available from `GET /api/v1/diagnostics`; the response is a safe summary of build info, enabled runtimes, worker counts, metrics availability, and managed-agent capability readiness. It does not return bearer tokens or kubeconfig contents.
 
