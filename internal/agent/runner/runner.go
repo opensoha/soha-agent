@@ -563,10 +563,11 @@ func (r *Runner) claimDockerOperation(ctx context.Context) (DockerOperation, boo
 		return DockerOperation{}, false
 	}
 	operation, err := r.apiClient().ClaimDockerOperation(ctx, dockerClaimRequest{
-		WorkerID:       workerID,
-		AgentID:        firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent"),
-		HostIDs:        r.cfg.Docker.HostIDs,
-		OperationKinds: operationKinds,
+		WorkerID:               workerID,
+		AgentID:                firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent"),
+		HostIDs:                r.cfg.Docker.HostIDs,
+		OperationKinds:         operationKinds,
+		CallbackTokenSupported: true,
 	})
 	if err != nil {
 		r.metrics.markClaim(metricScopeDocker, false)
@@ -1544,11 +1545,12 @@ func (r *Runner) dockerCallback(ctx context.Context, operation DockerOperation, 
 	var result DockerOperation
 	ok := r.withCallbackRetry(ctx, metricScopeDocker, status, func() error {
 		next, err := r.apiClient().RecordDockerOperationCallback(ctx, dockerCallbackRequest{
-			OperationID: operation.ID,
-			WorkerID:    dockerWorkerID(r.cfg),
-			Status:      status,
-			Payload:     redactedPayload,
-			Logs:        redactAgentRuntimeLogs(logs),
+			OperationID:   operation.ID,
+			WorkerID:      dockerWorkerID(r.cfg),
+			CallbackToken: operation.CallbackToken,
+			Status:        status,
+			Payload:       redactedPayload,
+			Logs:          redactAgentRuntimeLogs(logs),
 		})
 		if err != nil {
 			return err

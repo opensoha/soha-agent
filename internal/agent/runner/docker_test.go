@@ -59,6 +59,54 @@ func TestDockerOperationStopsWhenInitialCallbackReturnsTerminalState(t *testing.
 	}
 }
 
+func TestDockerClaimNegotiatesAndCallbackReturnsToken(t *testing.T) {
+	const token = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
+	requestCount := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requestCount++
+		switch r.URL.Path {
+		case "/api/v1/docker/operations/claim":
+			var req dockerClaimRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode claim: %v", err)
+			}
+			if !req.CallbackTokenSupported {
+				t.Fatal("claim did not advertise callback token support")
+			}
+			return jsonResponse(t, http.StatusAccepted, map[string]any{"data": DockerOperation{ID: "operation-1", CallbackToken: token}}), nil
+		case "/api/v1/docker/operation-callbacks":
+			var req dockerCallbackRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode callback: %v", err)
+			}
+			if req.CallbackToken != token {
+				t.Fatalf("callback token = %q, want claim token", req.CallbackToken)
+			}
+			return jsonResponse(t, http.StatusAccepted, map[string]any{"data": DockerOperation{ID: "operation-1", Status: "completed"}}), nil
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			return nil, nil
+		}
+	})
+	runner := New(cfgpkg.ControlPlaneConfig{
+		BaseURL: "http://control-plane", BearerToken: "runner-token", AgentID: "agent-1",
+		CallbackRetry: cfgpkg.CallbackRetryConfig{MaxAttempts: 1, Backoff: time.Millisecond},
+		Docker:        cfgpkg.DockerRunnerConfig{OperationKinds: []string{"host_sync"}},
+	}, zap.NewNop())
+	runner.httpClient = &http.Client{Transport: transport}
+
+	operation, ok := runner.claimDockerOperation(context.Background())
+	if !ok || operation.CallbackToken != token {
+		t.Fatalf("claimed operation = %#v ok=%v, want callback token", operation, ok)
+	}
+	if _, ok := runner.dockerCallback(context.Background(), operation, "completed", nil, nil); !ok {
+		t.Fatal("docker callback failed")
+	}
+	if requestCount != 2 {
+		t.Fatalf("request count = %d, want 2", requestCount)
+	}
+}
+
 func TestPrepareComposeWorkspaceRemovesStaleEnvFileWhenEnvContentIsCleared(t *testing.T) {
 	root := t.TempDir()
 	runner := New(cfgpkg.ControlPlaneConfig{
