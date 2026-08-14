@@ -13,7 +13,7 @@ description: >-
   This skill enforces standalone-agent boundaries, no imports from the core
   `soha` repository internals, explicit mutation allowlists, redacted errors,
   contract DTO compatibility, runner idempotency around terminal states, and
-  Go 1.26.5 build, dependency, race, lint, and vulnerability gates.
+  Go 1.26.6 build, dependency, race, lint, and vulnerability gates.
 ---
 
 # Soha Agent
@@ -77,7 +77,7 @@ control plane, and calls back with task, Docker, or Agent Runtime results.
 
 ## CI Gate
 
-Use Go `1.26.5` and run the full gate for dependency, packaging, Dockerfile, workflow, or release changes:
+Use Go `1.26.6` and run the full gate for dependency, packaging, Dockerfile, workflow, or release changes:
 
 ```bash
 GOWORK=off go mod tidy

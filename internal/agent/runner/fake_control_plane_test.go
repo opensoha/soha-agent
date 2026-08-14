@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -150,6 +151,48 @@ func TestRunnerNoContentClaimsAreIdle(t *testing.T) {
 	}
 	if metrics := dockerRunner.MetricsSnapshot().Docker; metrics.Claims != 0 || metrics.ClaimMisses != 1 {
 		t.Fatalf("Docker claim metrics = %#v, want one miss", metrics)
+	}
+}
+
+func TestDockerOnlyRunnerDoesNotPollExecutionTasks(t *testing.T) {
+	dockerClaimed := make(chan struct{}, 1)
+	var executionClaims atomic.Int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/v1/docker/operations/claim":
+			select {
+			case dockerClaimed <- struct{}{}:
+			default:
+			}
+		case "/api/v1/delivery/execution-tasks/claim":
+			executionClaims.Add(1)
+		}
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Status:     http.StatusText(http.StatusNoContent),
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+			Request:    r,
+		}, nil
+	})
+
+	runner := New(cfgpkg.ControlPlaneConfig{
+		Enabled: true, BaseURL: "http://control-plane", BearerToken: "host-runtime-token", PollInterval: time.Millisecond,
+		Docker: cfgpkg.DockerRunnerConfig{Enabled: true, WorkerID: "host-1", HostIDs: []string{"host-1"}, OperationKinds: []string{"host_sync"}},
+	}, zap.NewNop())
+	runner.httpClient = &http.Client{Transport: transport}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner.Start(ctx)
+
+	select {
+	case <-dockerClaimed:
+	case <-time.After(time.Second):
+		t.Fatal("Docker-only runner did not poll Docker operations")
+	}
+	cancel()
+	if got := executionClaims.Load(); got != 0 {
+		t.Fatalf("execution task claims = %d, want 0", got)
 	}
 }
 

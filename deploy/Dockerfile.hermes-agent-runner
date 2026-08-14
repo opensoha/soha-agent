@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS soha-agent-build
+FROM --platform=$BUILDPLATFORM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS soha-agent-build
 ARG TARGETOS=linux
 ARG TARGETARCH
 ARG GOPROXY=https://proxy.golang.org,direct
@@ -13,7 +13,7 @@ RUN apt-get update \
 COPY go.mod go.sum ./soha-agent/
 COPY --from=contracts go.mod go.sum ./soha-contracts/
 RUN for attempt in 1 2 3; do \
-      printf 'go 1.26.5\n\nuse (\n\t./soha-agent\n\t./soha-contracts\n)\n\nreplace github.com/opensoha/soha-contracts v0.1.5 => ./soha-contracts\n' > go.work; \
+      printf 'go 1.26.6\n\nuse (\n\t./soha-agent\n\t./soha-contracts\n)\n' > go.work; \
       (cd soha-agent && go mod download) && exit 0; \
       echo "go mod download failed on attempt ${attempt}, retrying..." >&2; \
       sleep 2; \
@@ -22,7 +22,7 @@ RUN for attempt in 1 2 3; do \
 COPY --from=contracts . ./soha-contracts
 COPY . ./soha-agent
 RUN if [ -z "$TARGETARCH" ]; then TARGETARCH="$(go env GOARCH)"; fi; \
-    cd soha-agent && GOWORK=off CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Version=${VERSION} -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Commit=${COMMIT} -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Date=${DATE}" -o /out/soha-agent ./cmd/agent
+    cd soha-agent && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Version=${VERSION} -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Commit=${COMMIT} -X github.com/opensoha/soha-agent/internal/agent/buildinfo.Date=${DATE}" -o /out/soha-agent ./cmd/agent
 
 FROM nousresearch/hermes-agent:v2026.6.5@sha256:9ad3b04ec916ea2c2da22358fd43b024c788d74073210695af88bfc2e63869b4
 USER root

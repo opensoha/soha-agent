@@ -429,7 +429,9 @@ func (r *Runner) Start(ctx context.Context) {
 	if !r.cfg.Enabled || strings.TrimSpace(r.cfg.BaseURL) == "" || strings.TrimSpace(r.cfg.BearerToken) == "" {
 		return
 	}
-	go r.loop(ctx)
+	if len(r.cfg.ProviderKinds) > 0 {
+		go r.loop(ctx)
+	}
 	if r.cfg.Docker.Enabled {
 		go r.dockerLoop(ctx)
 	}

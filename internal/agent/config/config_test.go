@@ -14,6 +14,35 @@ const (
 	productionControlPlaneToken = "runner-token-32-characters-minimum"
 )
 
+func TestLoadPreservesExplicitEmptyProviderKinds(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "agent.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+app:
+  env: development
+http:
+  addr: 127.0.0.1:18080
+control_plane:
+  enabled: true
+  base_url: https://soha.example.com
+  bearer_token: runner-token-32-characters-minimum
+  provider_kinds: []
+  docker:
+    enabled: true
+    operation_kinds: [host_sync]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SOHA_AGENT_CONFIG_FILE", configPath)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.ControlPlane.ProviderKinds) != 0 {
+		t.Fatalf("provider kinds = %v, want explicit empty list", cfg.ControlPlane.ProviderKinds)
+	}
+}
+
 func TestValidateRequiresProductionAgentToken(t *testing.T) {
 	err := Validate(Config{
 		App: AppConfig{Env: "production"},
