@@ -7,16 +7,35 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, for example v0.1.5"
+        description: "Release version, for example v0.1.6"
         required: true
-        default: "v0.1.5"
+        default: "v0.1.6"
+      contracts_ref:
+        description: "soha-contracts tag or commit to use for image builds"
+        required: true
+        default: "v0.1.13"
 
 permissions:
   contents: write
   packages: write
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent
+        uses: actions/checkout@v7
+        with:
+          path: soha-agent
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: soha-agent
+        run: |
+          grep -F "image: ghcr.io/opensoha/soha-agent:${GITHUB_REF_NAME}" deploy/kubernetes/base/soha-agent.yaml
+          grep -F "newTag: ${GITHUB_REF_NAME}" deploy/kubernetes/outpost/kustomization.yaml
+
   binaries:
+    needs: verify
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,7 +61,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: opensoha/soha-contracts
-          ref: ${{ github.event.inputs.version || github.ref_name }}
+          ref: ${{ inputs.contracts_ref || 'v0.1.13' }}
           path: soha-contracts
           token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: actions/setup-go@v6
@@ -79,6 +98,7 @@ jobs:
           if-no-files-found: error
 
   image:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agent
@@ -89,7 +109,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: opensoha/soha-contracts
-          ref: ${{ github.event.inputs.version || github.ref_name }}
+          ref: ${{ inputs.contracts_ref || 'v0.1.13' }}
           path: soha-contracts
           token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: docker/setup-qemu-action@v3
