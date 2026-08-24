@@ -204,6 +204,7 @@ func New(cfg cfgpkg.ControlPlaneConfig, logger *zap.Logger) *Runner {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	logger = logger.Named("runner")
 	providerRegistry, err := NewDynamicAgentProviderRegistry(DefaultAgentProviderRegistry())
 	if err != nil {
 		panic(fmt.Sprintf("invalid built-in agent provider registry: %v", err))

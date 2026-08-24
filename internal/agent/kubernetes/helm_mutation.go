@@ -167,6 +167,57 @@ func (c *Client) DeleteHelmRelease(ctx context.Context, namespace, name string) 
 	return nil
 }
 
+func (c *Client) DryRunHelmReleaseRollback(ctx context.Context, namespace, name string, input domainresource.HelmReleaseRollbackInput) error {
+	_, err := c.rollbackHelmRelease(ctx, namespace, name, input, true)
+	return err
+}
+
+func (c *Client) RollbackHelmRelease(ctx context.Context, namespace, name string, input domainresource.HelmReleaseRollbackInput) (domainresource.HelmReleaseDetailView, error) {
+	return c.rollbackHelmRelease(ctx, namespace, name, input, false)
+}
+
+func (c *Client) rollbackHelmRelease(ctx context.Context, namespace, name string, input domainresource.HelmReleaseRollbackInput, dryRun bool) (domainresource.HelmReleaseDetailView, error) {
+	input, err := normalizeAgentHelmRollbackInput(input)
+	if err != nil {
+		return domainresource.HelmReleaseDetailView{}, err
+	}
+	actionConfig, err := c.helmActionConfig(strings.TrimSpace(namespace))
+	if err != nil {
+		return domainresource.HelmReleaseDetailView{}, err
+	}
+	rollback := action.NewRollback(actionConfig)
+	rollback.Version = input.Revision
+	rollback.Timeout = time.Duration(input.TimeoutSeconds) * time.Second
+	rollback.WaitForJobs = input.Wait
+	rollback.WaitStrategy = kube.HookOnlyStrategy
+	if input.Wait {
+		rollback.WaitStrategy = kube.LegacyStrategy
+	}
+	if dryRun {
+		rollback.DryRunStrategy = action.DryRunServer
+	}
+	if err := rollback.Run(strings.TrimSpace(name)); err != nil {
+		return domainresource.HelmReleaseDetailView{}, fmt.Errorf("rollback helm release %s: %w", name, err)
+	}
+	if dryRun {
+		return domainresource.HelmReleaseDetailView{}, nil
+	}
+	return c.GetHelmReleaseDetail(ctx, namespace, name)
+}
+
+func normalizeAgentHelmRollbackInput(input domainresource.HelmReleaseRollbackInput) (domainresource.HelmReleaseRollbackInput, error) {
+	if input.Revision < 1 {
+		return input, fmt.Errorf("revision must be a positive integer")
+	}
+	if input.TimeoutSeconds == 0 {
+		input.TimeoutSeconds = defaultAgentHelmTimeoutSeconds
+	}
+	if input.TimeoutSeconds < 1 || input.TimeoutSeconds > maxAgentHelmTimeoutSeconds {
+		return input, fmt.Errorf("timeoutSeconds must be between 1 and %d", maxAgentHelmTimeoutSeconds)
+	}
+	return input, nil
+}
+
 func (c *Client) helmActionConfig(namespace string) (*action.Configuration, error) {
 	actionConfig := action.NewConfiguration(action.ConfigurationSetLogger(slog.NewTextHandler(io.Discard, nil)))
 	getter := agentHelmRESTClientGetter{restConfig: c.restConfig, namespace: namespace}

@@ -32,6 +32,7 @@ func New(cfg cfgpkg.ControlPlaneConfig, logger *zap.Logger) (*Manager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	logger = logger.Named("session")
 	runtimeURL, err := url.Parse(strings.TrimSpace(cfg.RuntimeEndpoint))
 	if err != nil || runtimeURL.Host == "" {
 		return nil, fmt.Errorf("parse Agent runtime endpoint")
@@ -67,7 +68,12 @@ func (m *Manager) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		m.logger.Warn("Agent session disconnected; reconnecting", zap.String("cluster_id", m.cfg.AgentID), zap.Error(err), zap.Duration("retry_in", backoff))
+		m.logger.Warn("Agent session disconnected; reconnecting",
+			zap.String("event", "agent.session.disconnected"),
+			zap.String("cluster_id", m.cfg.AgentID),
+			zap.String("error_type", fmt.Sprintf("%T", err)),
+			zap.Duration("retry_in", backoff),
+		)
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
@@ -129,7 +135,10 @@ func (m *Manager) runSession(ctx context.Context) error {
 		return fmt.Errorf("create Agent session multiplexer: %w", err)
 	}
 	defer func() { _ = mux.Close() }()
-	m.logger.Info("Agent session connected", zap.String("cluster_id", m.cfg.AgentID))
+	m.logger.Info("Agent session connected",
+		zap.String("event", "agent.session.connected"),
+		zap.String("cluster_id", m.cfg.AgentID),
+	)
 
 	for {
 		stream, err := mux.AcceptStream()

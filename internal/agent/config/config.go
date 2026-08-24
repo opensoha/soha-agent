@@ -290,8 +290,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("http.read_timeout", "15s")
 	v.SetDefault("http.write_timeout", "15s")
 	v.SetDefault("http.allowed_origins", []string{})
-	v.SetDefault("logger.level", "debug")
-	v.SetDefault("logger.format", "console")
+	v.SetDefault("logger.level", "info")
+	v.SetDefault("logger.format", "json")
 	v.SetDefault("auth.bearer_token", "")
 	v.SetDefault("auth.bearer_token_file", "")
 	v.SetDefault("security.allowed_actions", []string{})
@@ -458,6 +458,7 @@ func knownAction(action string) bool {
 		"platform.helm_releases.install",
 		"platform.helm_releases.values_update",
 		"platform.helm_releases.delete",
+		"platform.helm_releases.rollback",
 		"runtime.execution_tasks.cancel",
 		"docker.runtime.terminal":
 		return true

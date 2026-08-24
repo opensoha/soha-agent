@@ -3,6 +3,8 @@ kind: Kustomization
 namespace: soha-agent
 resources:
   - soha-agent.yaml
-commonLabels:
-  app.kubernetes.io/name: soha-agent
-  app.kubernetes.io/part-of: opensoha
+labels:
+  - pairs:
+      app.kubernetes.io/name: soha-agent
+      app.kubernetes.io/part-of: opensoha
+    includeSelectors: true

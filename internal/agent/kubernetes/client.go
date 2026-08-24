@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -21,6 +22,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -34,6 +36,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
@@ -44,12 +47,13 @@ import (
 )
 
 type Client struct {
-	cfg        cfgpkg.KubernetesConfig
-	typed      kubernetes.Interface
-	dynamic    dynamic.Interface
-	discovery  discovery.DiscoveryInterface
-	metadata   metadata.Interface
-	restConfig *rest.Config
+	cfg            cfgpkg.KubernetesConfig
+	typed          kubernetes.Interface
+	dynamic        dynamic.Interface
+	discovery      discovery.DiscoveryInterface
+	metadata       metadata.Interface
+	restConfig     *rest.Config
+	resourceEvents *resourceEventStream
 }
 
 func New(cfg cfgpkg.KubernetesConfig) (*Client, error) {
@@ -73,7 +77,9 @@ func New(cfg cfgpkg.KubernetesConfig) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build metadata client: %w", err)
 	}
-	return &Client{cfg: cfg, typed: typedClient, dynamic: dynamicClient, discovery: discoveryClient, metadata: metadataClient, restConfig: restConfig}, nil
+	client := &Client{cfg: cfg, typed: typedClient, dynamic: dynamicClient, discovery: discoveryClient, metadata: metadataClient, restConfig: restConfig}
+	client.resourceEvents = newResourceEventStream(cfg.ID, typedClient)
+	return client, nil
 }
 
 func (c *Client) Summary(_ context.Context) domaincluster.Summary {
@@ -782,16 +788,26 @@ func (c *Client) GetResourceYAML(ctx context.Context, namespace, kind, name stri
 }
 
 func (c *Client) ApplyResourceYAML(ctx context.Context, namespace, kind, name, content string) (domainresource.ResourceYAMLView, error) {
+	view, _, err := c.applyResourceYAML(ctx, namespace, kind, name, content, false)
+	return view, err
+}
+
+func (c *Client) DryRunResourceYAML(ctx context.Context, namespace, kind, name, content string) (domainresource.ResourceUpdateAnalysis, error) {
+	_, analysis, err := c.applyResourceYAML(ctx, namespace, kind, name, content, true)
+	return analysis, err
+}
+
+func (c *Client) applyResourceYAML(ctx context.Context, namespace, kind, name, content string, dryRun bool) (domainresource.ResourceYAMLView, domainresource.ResourceUpdateAnalysis, error) {
 	if strings.TrimSpace(content) == "" {
-		return domainresource.ResourceYAMLView{}, fmt.Errorf("yaml content is required")
+		return domainresource.ResourceYAMLView{}, domainresource.ResourceUpdateAnalysis{}, fmt.Errorf("yaml content is required")
 	}
 	gvr, namespaceScoped, canonicalKind, err := resourceGVRForKind(kind)
 	if err != nil {
-		return domainresource.ResourceYAMLView{}, err
+		return domainresource.ResourceYAMLView{}, domainresource.ResourceUpdateAnalysis{}, err
 	}
 	var object map[string]any
 	if err := yaml.Unmarshal([]byte(content), &object); err != nil {
-		return domainresource.ResourceYAMLView{}, fmt.Errorf("invalid yaml: %w", err)
+		return domainresource.ResourceYAMLView{}, domainresource.ResourceUpdateAnalysis{}, fmt.Errorf("invalid yaml: %w", err)
 	}
 	item := &unstructured.Unstructured{Object: object}
 	item.SetKind(canonicalKind)
@@ -799,35 +815,53 @@ func (c *Client) ApplyResourceYAML(ctx context.Context, namespace, kind, name, c
 		item.SetName(name)
 	}
 	if item.GetName() != name {
-		return domainresource.ResourceYAMLView{}, fmt.Errorf("yaml metadata.name does not match target resource")
+		return domainresource.ResourceYAMLView{}, domainresource.ResourceUpdateAnalysis{}, fmt.Errorf("yaml metadata.name does not match target resource")
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	resource, effectiveNamespace, err := c.dynamicResource(gvr, namespaceScoped, namespace, item)
 	if err != nil {
-		return domainresource.ResourceYAMLView{}, err
+		return domainresource.ResourceYAMLView{}, domainresource.ResourceUpdateAnalysis{}, err
 	}
-	if item.GetResourceVersion() == "" {
-		current, err := resource.Get(queryCtx, name, metav1.GetOptions{})
-		if err != nil {
-			return domainresource.ResourceYAMLView{}, err
-		}
-		item.SetResourceVersion(current.GetResourceVersion())
-	}
-	updated, err := resource.Update(queryCtx, item, metav1.UpdateOptions{})
+	current, err := resource.Get(queryCtx, name, metav1.GetOptions{})
 	if err != nil {
-		return domainresource.ResourceYAMLView{}, err
+		return domainresource.ResourceYAMLView{}, domainresource.ResourceUpdateAnalysis{}, err
 	}
+	item.SetAPIVersion(gvr.GroupVersion().String())
+	item.SetResourceVersion("")
+	unstructured.RemoveNestedField(item.Object, "metadata", "uid")
+	unstructured.RemoveNestedField(item.Object, "metadata", "managedFields")
+	unstructured.RemoveNestedField(item.Object, "metadata", "creationTimestamp")
+	unstructured.RemoveNestedField(item.Object, "metadata", "generation")
+	unstructured.RemoveNestedField(item.Object, "status")
+	analysis := analyzeResourceUpdate(current, item)
+	patch, err := json.Marshal(item.Object)
+	if err != nil {
+		return domainresource.ResourceYAMLView{}, analysis, err
+	}
+	options := metav1.PatchOptions{FieldManager: resourceEditFieldManager, Force: ptr.To(false)}
+	if dryRun {
+		options.DryRun = []string{metav1.DryRunAll}
+	}
+	updated, err := resource.Patch(queryCtx, name, types.ApplyPatchType, patch, options)
+	if err != nil {
+		if dryRun && apierrors.IsConflict(err) {
+			analysis.Conflicts = conflictsFromError(err.Error(), analysis)
+			return domainresource.ResourceYAMLView{}, analysis, nil
+		}
+		return domainresource.ResourceYAMLView{}, analysis, err
+	}
+	unstructured.RemoveNestedField(updated.Object, "metadata", "managedFields")
 	rendered, err := yaml.Marshal(updated.Object)
 	if err != nil {
-		return domainresource.ResourceYAMLView{}, err
+		return domainresource.ResourceYAMLView{}, analysis, err
 	}
 	return domainresource.ResourceYAMLView{
 		Kind:      canonicalKind,
 		Name:      updated.GetName(),
 		Namespace: effectiveNamespace,
 		Content:   string(rendered),
-	}, nil
+	}, analysis, nil
 }
 
 func (c *Client) DeleteResource(ctx context.Context, namespace, kind, name string) error {
@@ -1009,6 +1043,18 @@ func (c *Client) GetHelmReleaseValues(ctx context.Context, namespace, name, revi
 		Original:    content,
 		Editable:    false,
 		DiffEnabled: true,
+	}, nil
+}
+
+func (c *Client) GetHelmReleaseManifest(ctx context.Context, namespace, name, revision string) (domainresource.HelmReleaseManifestView, error) {
+	record, err := c.getHelmReleaseRecord(ctx, namespace, name, revision)
+	if err != nil {
+		return domainresource.HelmReleaseManifestView{}, err
+	}
+	return domainresource.HelmReleaseManifestView{
+		Name: record.release.Name, Namespace: record.release.Namespace,
+		Revision: strconv.Itoa(record.release.Version), Content: record.release.Manifest,
+		Digest: helmrelease.Digest(record.release.Manifest),
 	}, nil
 }
 
@@ -2966,21 +3012,35 @@ func dedupeHelmReleases(items []domainresource.HelmReleaseView) []domainresource
 
 func mapService(item corev1.Service) domainresource.ServiceView {
 	ports := make([]string, 0, len(item.Spec.Ports))
+	portMappings := make([]domainresource.ServicePortView, 0, len(item.Spec.Ports))
 	for _, port := range item.Spec.Ports {
 		name := port.Name
 		if name != "" {
 			name = name + ":"
 		}
-		ports = append(ports, fmt.Sprintf("%s%d/%s", name, port.Port, strings.ToLower(string(port.Protocol))))
+		description := fmt.Sprintf("%s%d/%s", name, port.Port, strings.ToLower(string(port.Protocol)))
+		if port.NodePort > 0 {
+			description += fmt.Sprintf(" (nodePort:%d)", port.NodePort)
+		}
+		ports = append(ports, description)
+		targetPort := port.TargetPort.String()
+		if targetPort == "" || targetPort == "0" {
+			targetPort = strconv.Itoa(int(port.Port))
+		}
+		portMappings = append(portMappings, domainresource.ServicePortView{
+			Name: port.Name, Protocol: string(port.Protocol), TargetPort: targetPort,
+			Port: port.Port, NodePort: port.NodePort,
+		})
 	}
 	return domainresource.ServiceView{
-		Name:       item.Name,
-		Namespace:  item.Namespace,
-		Type:       string(item.Spec.Type),
-		ClusterIP:  item.Spec.ClusterIP,
-		Ports:      ports,
-		Selector:   item.Spec.Selector,
-		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
+		Name:         item.Name,
+		Namespace:    item.Namespace,
+		Type:         string(item.Spec.Type),
+		ClusterIP:    item.Spec.ClusterIP,
+		Ports:        ports,
+		PortMappings: portMappings,
+		Selector:     item.Spec.Selector,
+		AgeSeconds:   secondsSince(item.CreationTimestamp.Time),
 	}
 }
 
@@ -2989,7 +3049,8 @@ func buildServiceDetail(item corev1.Service, slices []discoveryv1.EndpointSlice,
 	endpoints := mapEndpointSliceEndpoints(slices)
 	return domainresource.ServiceDetailView{
 		Name: summary.Name, Namespace: summary.Namespace, Type: summary.Type, ClusterIP: summary.ClusterIP,
-		Ports: summary.Ports, Selector: summary.Selector, Labels: item.Labels, Annotations: item.Annotations,
+		Ports: summary.Ports, PortMappings: summary.PortMappings, Selector: summary.Selector,
+		Labels: item.Labels, Annotations: item.Annotations,
 		Endpoints: endpoints, BackendPods: backendPods, AgeSeconds: summary.AgeSeconds,
 	}
 }

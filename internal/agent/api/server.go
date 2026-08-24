@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -43,8 +44,17 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 	if err := router.SetTrustedProxies(nil); err != nil {
 		panic(fmt.Sprintf("disable trusted proxies: %v", err))
 	}
-	router.Use(gin.Recovery())
 	router.Use(apiMiddleware.RequestID())
+	httpLogger := logger.Named("http")
+	router.Use(apiMiddleware.RequestLogger(httpLogger))
+	router.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered any) {
+		httpLogger.Error("http request panic recovered",
+			zap.String("event", "http.request.panic"),
+			zap.String("request_id", c.GetString("request_id")),
+			zap.String("panic_type", fmt.Sprintf("%T", recovered)),
+		)
+		c.AbortWithStatus(http.StatusInternalServerError)
+	}))
 	auditSink := newActionAuditSink(cfg.Audit, logger)
 	actions := newActionPolicy(cfg.Security, logger, auditSink)
 	registerSystemRoutes(router, cfg, client, runtime)
@@ -53,7 +63,8 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 	registerDockerRuntimeRoutes(router, cfg, logger, actions)
 	registerOutpostRoutes(router, cfg, runtime)
 
-	logger.Info("agent server configured",
+	httpLogger.Info("agent server configured",
+		zap.String("event", "agent.server.configured"),
 		zap.String("addr", cfg.HTTP.Addr),
 		zap.String("base_path", cfg.HTTP.BasePath),
 		zap.String("cluster_id", cfg.Kubernetes.ID),

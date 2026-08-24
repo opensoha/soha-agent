@@ -1,8 +1,10 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
@@ -23,6 +25,60 @@ type deleteResourceRequest struct {
 }
 
 func registerResourceYAMLRoutes(platform *gin.RouterGroup, client *k8sagent.Client, actions actionPolicy) {
+	platform.GET("/resources/stream", func(c *gin.Context) {
+		events, unsubscribe, err := client.SubscribeResourceEvents(c.Query("namespace"), splitAgentResourceKinds(c.Query("kinds")))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		defer unsubscribe()
+		c.Header("Content-Type", "application/x-ndjson")
+		c.Status(http.StatusOK)
+		encoder := json.NewEncoder(c.Writer)
+		status := "warming"
+		if client.ResourceEventsReady() {
+			status = "live"
+		}
+		if err := encoder.Encode(map[string]any{"type": "status", "clusterId": client.Summary(c.Request.Context()).ID, "observedAt": time.Now().UTC().Format(time.RFC3339Nano), "source": "agent-informer", "cacheStatus": status}); err != nil {
+			return
+		}
+		c.Writer.Flush()
+		for {
+			select {
+			case <-c.Request.Context().Done():
+				return
+			case event, ok := <-events:
+				if !ok {
+					return
+				}
+				if err := encoder.Encode(event); err != nil {
+					return
+				}
+				c.Writer.Flush()
+			}
+		}
+	})
+	platform.GET("/resources/graph", func(c *gin.Context) {
+		kind, name := c.Query("kind"), c.Query("name")
+		if strings.TrimSpace(kind) == "" || strings.TrimSpace(name) == "" {
+			apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "kind and name are required")
+			return
+		}
+		item, err := client.GetResourceGraph(c.Request.Context(), c.Query("namespace"), kind, name)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
+	platform.GET("/security/posture", func(c *gin.Context) {
+		item, err := client.GetSecurityPosture(c.Request.Context(), c.Query("namespace"), parseLimit(c.Query("limit"), 100))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
 	platform.GET("/resources/yaml", func(c *gin.Context) {
 		namespace := c.Query("namespace")
 		kind := c.Query("kind")
@@ -37,6 +93,19 @@ func registerResourceYAMLRoutes(platform *gin.RouterGroup, client *k8sagent.Clie
 			return
 		}
 		apiresponse.Item(c, http.StatusOK, item)
+	})
+	platform.POST("/resources/yaml/preflight", actions.Require(actionPlatformResourcesApply), func(c *gin.Context) {
+		var req resourceYAMLRequest
+		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Kind) == "" || strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Content) == "" {
+			apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "kind, name, and content are required")
+			return
+		}
+		analysis, err := client.DryRunResourceYAML(c.Request.Context(), req.Namespace, req.Kind, req.Name, req.Content)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, gin.H{"valid": len(analysis.Conflicts) == 0, "analysis": analysis})
 	})
 	platform.PUT("/resources/yaml", actions.Require(actionPlatformResourcesApply), func(c *gin.Context) {
 		var req resourceYAMLRequest
@@ -63,4 +132,15 @@ func registerResourceYAMLRoutes(platform *gin.RouterGroup, client *k8sagent.Clie
 		}
 		apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
 	})
+}
+
+func splitAgentResourceKinds(value string) []string {
+	parts := strings.Split(value, ",")
+	kinds := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if kind := strings.TrimSpace(part); kind != "" {
+			kinds = append(kinds, kind)
+		}
+	}
+	return kinds
 }

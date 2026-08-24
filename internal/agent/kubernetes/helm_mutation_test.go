@@ -29,6 +29,18 @@ func TestNormalizeAgentHelmChartInstallInputBoundsTimeout(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentHelmRollbackInputRejectsUnboundedTimeout(t *testing.T) {
+	for _, timeout := range []int{-1, 3601, int(^uint(0) >> 1)} {
+		if _, err := normalizeAgentHelmRollbackInput(domainresource.HelmReleaseRollbackInput{Revision: 2, TimeoutSeconds: timeout}); err == nil {
+			t.Errorf("timeout %d succeeded", timeout)
+		}
+	}
+	input, err := normalizeAgentHelmRollbackInput(domainresource.HelmReleaseRollbackInput{Revision: 2})
+	if err != nil || input.TimeoutSeconds != defaultAgentHelmTimeoutSeconds {
+		t.Fatalf("default rollback input = %#v, %v", input, err)
+	}
+}
+
 func TestParseAgentHelmInstallValuesRejectsInvalidYAML(t *testing.T) {
 	if _, err := parseAgentHelmInstallValues("replicaCount: ["); err == nil {
 		t.Fatal("parseAgentHelmInstallValues() succeeded, want invalid yaml error")

@@ -37,6 +37,7 @@ const (
 	actionPlatformHelmReleaseInstall      = "platform.helm_releases.install"
 	actionPlatformHelmReleaseValuesUpdate = "platform.helm_releases.values_update"
 	actionPlatformHelmReleaseDelete       = "platform.helm_releases.delete"
+	actionPlatformHelmReleaseRollback     = "platform.helm_releases.rollback"
 	actionRuntimeExecutionTaskCancel      = "runtime.execution_tasks.cancel"
 	actionDockerRuntimeTerminal           = "docker.runtime.terminal"
 )

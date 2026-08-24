@@ -237,6 +237,7 @@ func TestValidateAllowsProductionRuntimeParityActionAllowlist(t *testing.T) {
 			"platform.helm_releases.install",
 			"platform.helm_releases.values_update",
 			"platform.helm_releases.delete",
+			"platform.helm_releases.rollback",
 		}},
 	})
 	if err != nil {

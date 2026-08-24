@@ -14,8 +14,8 @@ http:
     - http://127.0.0.1:8080
 
 logger:
-  level: debug
-  format: console
+  level: info
+  format: json
 
 auth:
   bearer_token: demo-agent-token
@@ -44,6 +44,7 @@ security:
     - platform.helm_releases.install
     - platform.helm_releases.values_update
     - platform.helm_releases.delete
+    - platform.helm_releases.rollback
     - runtime.execution_tasks.cancel
     - docker.runtime.terminal
 

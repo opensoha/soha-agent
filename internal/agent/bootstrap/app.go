@@ -43,8 +43,11 @@ func New(ctx context.Context) (*App, error) {
 			cancel()
 			return nil, fmt.Errorf("build kubernetes client: %w", err)
 		}
+		client.StartResourceEvents(lifecycleCtx)
 	} else {
-		logger.Info("agent kubernetes client disabled; platform proxy routes will be unavailable")
+		logger.Named("bootstrap").Info("agent kubernetes client disabled; platform proxy routes will be unavailable",
+			zap.String("event", "agent.kubernetes.disabled"),
+		)
 	}
 
 	controlPlane := cfg.ControlPlane

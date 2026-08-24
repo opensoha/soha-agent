@@ -46,4 +46,12 @@ func registerPlatformHelmReadRoutes(platform *gin.RouterGroup, client *k8sagent.
 		}
 		apiresponse.Item(c, http.StatusOK, item)
 	})
+	platform.GET("/helm/releases/:name/manifest", func(c *gin.Context) {
+		item, err := client.GetHelmReleaseManifest(c.Request.Context(), c.Query("namespace"), c.Param("name"), c.Query("revision"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
 }

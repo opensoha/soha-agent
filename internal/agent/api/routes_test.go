@@ -34,10 +34,10 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 	}
 	sort.Strings(signatures)
 	routeDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(signatures, "\n"))))
-	if len(signatures) != 138 {
-		t.Fatalf("route count = %d, want 138", len(signatures))
+	if len(signatures) != 146 {
+		t.Fatalf("route count = %d, want 146", len(signatures))
 	}
-	const expectedRouteDigest = "5fab963c9991ed254050bf80476774ba3155fb90701a9678fc3e560a4ccbc25d"
+	const expectedRouteDigest = "11bf3d5b5432c4687cdfbaeb7b608f601fc2905989f9afc9a7c2ef3f09ed7cfc"
 	if routeDigest != expectedRouteDigest {
 		t.Fatalf("route digest = %s, want %s", routeDigest, expectedRouteDigest)
 	}
@@ -50,8 +50,16 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 		http.MethodPost + " /api/v1/platform/logs/stream",
 		http.MethodGet + " /api/v1/platform/configuration/configmaps",
 		http.MethodGet + " /api/v1/platform/access-control/roles",
+		http.MethodPost + " /api/v1/platform/access-control/access-reviews",
 		http.MethodGet + " /api/v1/platform/network/services",
 		http.MethodGet + " /api/v1/platform/network/services/:name/detail",
+		http.MethodPost + " /api/v1/platform/resources/yaml/preflight",
+		http.MethodGet + " /api/v1/platform/resources/graph",
+		http.MethodGet + " /api/v1/platform/resources/stream",
+		http.MethodGet + " /api/v1/platform/security/posture",
+		http.MethodGet + " /api/v1/platform/helm/releases/:name/manifest",
+		http.MethodPost + " /api/v1/platform/helm/releases/:name/rollback/preflight",
+		http.MethodPost + " /api/v1/platform/helm/releases/:name/rollback",
 		http.MethodGet + " /api/v1/platform/storage/persistentvolumes",
 		http.MethodGet + " /api/v1/platform/helm/releases",
 		http.MethodGet + " /api/v1/runtime/execution-tasks",

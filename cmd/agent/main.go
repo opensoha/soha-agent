@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -28,16 +29,33 @@ func run(args []string) int {
 
 	application, err := agentbootstrap.New(ctx)
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "bootstrap soha agent: %v\n", err)
+		_ = json.NewEncoder(os.Stderr).Encode(struct {
+			Timestamp string `json:"timestamp"`
+			Level     string `json:"level"`
+			Component string `json:"component"`
+			Service   string `json:"service"`
+			Event     string `json:"event"`
+			Message   string `json:"message"`
+			ErrorType string `json:"error_type"`
+		}{
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+			Level:     "error",
+			Component: "bootstrap",
+			Service:   "soha-agent",
+			Event:     "agent.bootstrap.failed",
+			Message:   "soha agent bootstrap failed",
+			ErrorType: fmt.Sprintf("%T", err),
+		})
 		return 1
 	}
+	lifecycleLogger := application.Logger.Named("lifecycle")
 
 	runErr := make(chan error, 1)
 	go func() {
 		runErr <- application.Run()
 	}()
 
-	application.Logger.Info("soha agent started")
+	lifecycleLogger.Info("soha agent started", zap.String("event", "agent.started"))
 
 	exitCode := 0
 	select {
@@ -45,7 +63,10 @@ func run(args []string) int {
 		stop()
 	case err := <-runErr:
 		if err != nil {
-			application.Logger.Error("agent server exited with error", zap.Error(err))
+			lifecycleLogger.Error("agent server exited with error",
+				zap.String("event", "agent.server.failed"),
+				zap.String("error_type", fmt.Sprintf("%T", err)),
+			)
 			exitCode = 1
 		}
 	}
@@ -53,7 +74,10 @@ func run(args []string) int {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := application.Shutdown(shutdownCtx); err != nil {
-		application.Logger.Error("agent graceful shutdown failed", zap.Error(err))
+		lifecycleLogger.Error("agent graceful shutdown failed",
+			zap.String("event", "agent.shutdown.failed"),
+			zap.String("error_type", fmt.Sprintf("%T", err)),
+		)
 		return 1
 	}
 

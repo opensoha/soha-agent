@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -11,6 +12,24 @@ import (
 )
 
 func registerPlatformRBACRoutes(platform *gin.RouterGroup, client *k8sagent.Client) {
+	platform.POST("/access-control/access-reviews", func(c *gin.Context) {
+		var input domainresource.SubjectAccessReviewInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "invalid access review payload")
+			return
+		}
+		input, err := normalizeSubjectAccessReviewInput(input)
+		if err != nil {
+			apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", err.Error())
+			return
+		}
+		item, err := client.ReviewSubjectAccess(c.Request.Context(), input)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		apiresponse.Item(c, http.StatusOK, item)
+	})
 	platform.GET("/access-control/serviceaccounts", func(c *gin.Context) {
 		namespace := c.Query("namespace")
 		items, err := client.ListServiceAccounts(c.Request.Context(), namespace)
@@ -119,6 +138,38 @@ func registerPlatformRBACRoutes(platform *gin.RouterGroup, client *k8sagent.Clie
 		}
 		apiresponse.Item(c, http.StatusOK, item)
 	})
+}
+
+func normalizeSubjectAccessReviewInput(input domainresource.SubjectAccessReviewInput) (domainresource.SubjectAccessReviewInput, error) {
+	input.Subject.Kind = strings.TrimSpace(input.Subject.Kind)
+	input.Subject.Name = strings.TrimSpace(input.Subject.Name)
+	input.Subject.Namespace = strings.TrimSpace(input.Subject.Namespace)
+	if input.Subject.Name == "" {
+		return input, fmt.Errorf("subject name is required")
+	}
+	switch input.Subject.Kind {
+	case "User", "Group":
+	case "ServiceAccount":
+		if input.Subject.Namespace == "" {
+			return input, fmt.Errorf("service account namespace is required")
+		}
+	default:
+		return input, fmt.Errorf("subject kind must be User, Group, or ServiceAccount")
+	}
+	if len(input.Checks) == 0 || len(input.Checks) > 50 {
+		return input, fmt.Errorf("checks must contain between 1 and 50 items")
+	}
+	for index := range input.Checks {
+		input.Checks[index].Verb = strings.TrimSpace(input.Checks[index].Verb)
+		input.Checks[index].Group = strings.TrimSpace(input.Checks[index].Group)
+		input.Checks[index].Resource = strings.TrimSpace(input.Checks[index].Resource)
+		input.Checks[index].Namespace = strings.TrimSpace(input.Checks[index].Namespace)
+		input.Checks[index].Name = strings.TrimSpace(input.Checks[index].Name)
+		if input.Checks[index].Verb == "" || input.Checks[index].Resource == "" {
+			return input, fmt.Errorf("check verb and resource are required")
+		}
+	}
+	return input, nil
 }
 
 func subjectFilter(c *gin.Context) (kind, name, namespace string, requested bool) {

@@ -26,10 +26,28 @@ type (
 	WorkloadConditionView         = contractsresource.WorkloadConditionView
 	WorkloadContainerView         = contractsresource.WorkloadContainerView
 
-	ResourceQuantityView   = contractsresource.ResourceQuantityView
-	ResourcePercentageView = contractsresource.ResourcePercentageView
-	ResourceMetricsView    = contractsresource.ResourceMetricsView
-	ResourceYAMLView       = contractsresource.ResourceYAMLView
+	ResourceQuantityView      = contractsresource.ResourceQuantityView
+	ResourcePercentageView    = contractsresource.ResourcePercentageView
+	ResourceMetricsView       = contractsresource.ResourceMetricsView
+	ResourceYAMLView          = contractsresource.ResourceYAMLView
+	ResourceScopeMode         = contractsresource.ResourceScopeMode
+	ResourceRef               = contractsresource.ResourceRef
+	ResourceStreamEvent       = contractsresource.ResourceStreamEvent
+	ResourceGraphNode         = contractsresource.ResourceGraphNode
+	ResourceGraphEdge         = contractsresource.ResourceGraphEdge
+	ResourceEvidence          = contractsresource.ResourceEvidence
+	ResourceGraph             = contractsresource.ResourceGraph
+	ManagedFieldOwner         = contractsresource.ManagedFieldOwner
+	FieldConflict             = contractsresource.FieldConflict
+	ResourceUpdateAnalysis    = contractsresource.ResourceUpdateAnalysis
+	SecuritySeverityCounts    = contractsresource.SecuritySeverityCounts
+	SecurityFinding           = contractsresource.SecurityFinding
+	SecurityPosture           = contractsresource.SecurityPosture
+	AccessReviewSubject       = contractsresource.AccessReviewSubject
+	AccessReviewCheck         = contractsresource.AccessReviewCheck
+	SubjectAccessReviewInput  = contractsresource.SubjectAccessReviewInput
+	AccessReviewDecision      = contractsresource.AccessReviewDecision
+	SubjectAccessReviewResult = contractsresource.SubjectAccessReviewResult
 
 	MetricPointView  = contractsresource.MetricPointView
 	MetricSeriesView = contractsresource.MetricSeriesView
@@ -54,6 +72,7 @@ type (
 	ReplicationControllerDetailView = contractsresource.ReplicationControllerDetailView
 	WorkloadRelationView            = contractsresource.WorkloadRelationView
 
+	ServicePortView              = contractsresource.ServicePortView
 	ServiceView                  = contractsresource.ServiceView
 	ServiceDetailView            = contractsresource.ServiceDetailView
 	ServiceEndpointView          = contractsresource.ServiceEndpointView
@@ -149,6 +168,8 @@ type (
 	HelmReleaseView              = contractsresource.HelmReleaseView
 	HelmReleaseDetailView        = contractsresource.HelmReleaseDetailView
 	HelmReleaseHistoryView       = contractsresource.HelmReleaseHistoryView
+	HelmReleaseManifestView      = contractsresource.HelmReleaseManifestView
+	HelmReleaseRollbackInput     = contractsresource.HelmReleaseRollbackInput
 	HelmValuesView               = contractsresource.HelmValuesView
 	HelmChartRepositoryView      = contractsresource.HelmChartRepositoryView
 	HelmChartMaintainerView      = contractsresource.HelmChartMaintainerView
@@ -164,4 +185,9 @@ type (
 
 	PortForwardSessionView   = contractsresource.PortForwardSessionView
 	PortForwardRegisterInput = contractsresource.PortForwardRegisterInput
+)
+
+const (
+	ResourceScopeModeCluster   = contractsresource.ResourceScopeModeCluster
+	ResourceScopeModeNamespace = contractsresource.ResourceScopeModeNamespace
 )

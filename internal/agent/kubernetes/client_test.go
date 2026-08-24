@@ -9,15 +9,37 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-func TestBuildServiceDetailIncludesEndpointsAndPods(t *testing.T) {
+func TestBuildServiceDetailIncludesEndpointsPodsAndPorts(t *testing.T) {
 	ready := true
-	detail := buildServiceDetail(corev1.Service{}, []discoveryv1.EndpointSlice{{Endpoints: []discoveryv1.Endpoint{{
+	detail := buildServiceDetail(corev1.Service{Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{
+		Port: 80, Protocol: corev1.ProtocolTCP,
+	}}}}, []discoveryv1.EndpointSlice{{Endpoints: []discoveryv1.Endpoint{{
 		Addresses: []string{"10.1.0.1"}, Conditions: discoveryv1.EndpointConditions{Ready: &ready},
 	}}}}, []domainresource.PodView{{Name: "api-1"}})
-	if len(detail.Endpoints) != 1 || detail.Endpoints[0].Ready == nil || !*detail.Endpoints[0].Ready || len(detail.BackendPods) != 1 {
+	if len(detail.Endpoints) != 1 || detail.Endpoints[0].Ready == nil || !*detail.Endpoints[0].Ready || len(detail.BackendPods) != 1 || len(detail.PortMappings) != 1 || detail.PortMappings[0].TargetPort != "80" {
 		t.Fatalf("buildServiceDetail() = %#v", detail)
+	}
+}
+
+func TestMapServiceIncludesAssignedNodePort(t *testing.T) {
+	t.Parallel()
+
+	view := mapService(corev1.Service{Spec: corev1.ServiceSpec{
+		Type: corev1.ServiceTypeNodePort,
+		Ports: []corev1.ServicePort{
+			{Name: "http", Port: 80, NodePort: 30080, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(8080)},
+			{Name: "metrics", Port: 9090, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromString("metrics-backend")},
+		},
+	}})
+
+	if len(view.Ports) != 2 || view.Ports[0] != "http:80/tcp (nodePort:30080)" || view.Ports[1] != "metrics:9090/tcp" {
+		t.Fatalf("mapService() ports = %#v", view.Ports)
+	}
+	if len(view.PortMappings) != 2 || view.PortMappings[0].TargetPort != "8080" || view.PortMappings[0].NodePort != 30080 || view.PortMappings[1].TargetPort != "metrics-backend" {
+		t.Fatalf("mapService() port mappings = %#v", view.PortMappings)
 	}
 }
 
