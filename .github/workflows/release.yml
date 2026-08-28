@@ -13,7 +13,7 @@ on:
       contracts_ref:
         description: "soha-contracts tag or commit to use for image builds"
         required: true
-        default: "v0.1.13"
+        default: "v0.1.15"
 
 permissions:
   contents: write
@@ -61,7 +61,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: opensoha/soha-contracts
-          ref: ${{ inputs.contracts_ref || 'v0.1.13' }}
+          ref: ${{ inputs.contracts_ref || 'v0.1.15' }}
           path: soha-contracts
           token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: actions/setup-go@v6
@@ -109,7 +109,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: opensoha/soha-contracts
-          ref: ${{ inputs.contracts_ref || 'v0.1.13' }}
+          ref: ${{ inputs.contracts_ref || 'v0.1.15' }}
           path: soha-contracts
           token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: docker/setup-qemu-action@v3
