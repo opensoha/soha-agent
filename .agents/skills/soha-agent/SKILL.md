@@ -1,19 +1,6 @@
 ---
 name: soha-agent
-description: >-
-  Implement or review the standalone Soha agent runtime in `cmd/agent/**`,
-  `internal/agent/**`, `internal/domain/**`, `configs/agent.config.yaml`,
-  `deploy/**`, Dockerfiles, release workflows, and agent-facing README content.
-  Use when changing the agent HTTP API, Kubernetes proxy routes, Helm/resource
-  mutation handlers, pod logs/terminal/port-forward streams, config loading,
-  production security validation, action allowlists and audit, control-plane
-  claim/heartbeat/callback runners, Docker operation runners, Identity Outpost
-  runtime, environment runtime management, Agent Runtime provider execution,
-  Hermes runner packaging, or Kubernetes deployment assets.
-  This skill enforces standalone-agent boundaries, no imports from the core
-  `soha` repository internals, explicit mutation allowlists, redacted errors,
-  contract DTO compatibility, runner idempotency around terminal states, and
-  Go 1.26.6 build, dependency, race, lint, and vulnerability gates.
+description: Change or review the standalone Soha agent APIs, runners, cluster adapters, security, or packaging. Preserve its independence from core internals.
 ---
 
 # Soha Agent
@@ -67,8 +54,8 @@ control plane, and calls back with task, Docker, or Agent Runtime results.
 
 ## Testing
 
-- Run focused package tests while iterating and the full gate in `references/go-engineering-standards.md` before completing production changes.
-- Run `GOWORK=off go test ./...` for normal changes; do not rely on a sibling `go.work` or unreviewed local contract code.
+- Run focused package tests for affected behavior; broaden to the full gate for architecture, dependency, security, runner/concurrency, packaging, or release changes. Documentation-only collaboration edits need metadata and link checks, not runtime builds.
+- Use `GOWORK=off` for Go verification; do not rely on a sibling `go.work` or unreviewed local contract code.
 - Run `go test ./internal/agent/api` for auth, action allowlist, route, and stream changes.
 - Run `go test ./internal/agent/runner` for claim/callback, Docker runner, Agent Runtime, cancellation, timeout, and metrics changes.
 - Run `go test ./internal/agent/environment` for environment lease, process/container runtime, snapshot, cleanup, and recovery changes.
