@@ -32,6 +32,7 @@ func TestCustomResourceCRUDUsesDynamicClient(t *testing.T) {
 			"name":            "sample",
 			"namespace":       "platform",
 			"resourceVersion": "1",
+			"uid":             "sample-uid",
 		},
 		"spec": map[string]any{"size": "small"},
 	}}
@@ -95,7 +96,7 @@ spec:
 		t.Fatalf("updated yaml = %q, want large", updated.Content)
 	}
 
-	if err := client.DeleteCustomResource(context.Background(), definition, "platform", "sample"); err != nil {
+	if err := client.DeleteCustomResource(context.Background(), definition, "platform", "sample", ""); err != nil {
 		t.Fatalf("DeleteCustomResource() error = %v", err)
 	}
 	_, err = client.dynamic.Resource(gvr).Namespace("platform").Get(context.Background(), "sample", metav1.GetOptions{})

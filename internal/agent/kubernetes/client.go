@@ -43,6 +43,7 @@ import (
 	domaincluster "github.com/opensoha/soha-agent/internal/domain/cluster"
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
 	helmrelease "github.com/opensoha/soha-contracts/helmrelease"
+	contractruntime "github.com/opensoha/soha-contracts/resource/runtime"
 	"github.com/opensoha/soha-contracts/streamlimit"
 )
 
@@ -106,7 +107,7 @@ func (c *Client) Summary(_ context.Context) domaincluster.Summary {
 	}
 
 	capabilities := []string{
-		"manifest.preflight", "manifest.ssa", "manifest.observe",
+		"manifest.preflight", "manifest.ssa", "manifest.observe", contractruntime.ManifestAgentCapability,
 		"logs.runtime.snapshot", "logs.runtime.stream", "logs.runtime.aggregate",
 	}
 	for _, group := range groups.Groups {
@@ -114,7 +115,7 @@ func (c *Client) Summary(_ context.Context) domaincluster.Summary {
 			continue
 		}
 		capabilities = append(capabilities, group.Name)
-		if len(capabilities) == 8 {
+		if len(capabilities) >= 9 {
 			break
 		}
 	}
@@ -398,6 +399,9 @@ func (c *Client) RollbackDeployment(ctx context.Context, namespace, name, revisi
 	defer cancel()
 	deployment, err := c.typed.AppsV1().Deployments(namespace).Get(queryCtx, name, metav1.GetOptions{})
 	if err != nil {
+		return err
+	}
+	if err := contractruntime.ValidateDirectManifestOwner(deployment); err != nil {
 		return err
 	}
 	replicaSets, err := c.typed.AppsV1().ReplicaSets(namespace).List(queryCtx, metav1.ListOptions{})
@@ -827,9 +831,12 @@ func (c *Client) applyResourceYAML(ctx context.Context, namespace, kind, name, c
 	if err != nil {
 		return domainresource.ResourceYAMLView{}, domainresource.ResourceUpdateAnalysis{}, err
 	}
+	if err := contractruntime.ValidateDirectManifestOwner(current); err != nil {
+		return domainresource.ResourceYAMLView{}, domainresource.ResourceUpdateAnalysis{}, err
+	}
 	item.SetAPIVersion(gvr.GroupVersion().String())
-	item.SetResourceVersion("")
-	unstructured.RemoveNestedField(item.Object, "metadata", "uid")
+	item.SetResourceVersion(current.GetResourceVersion())
+	item.SetUID(current.GetUID())
 	unstructured.RemoveNestedField(item.Object, "metadata", "managedFields")
 	unstructured.RemoveNestedField(item.Object, "metadata", "creationTimestamp")
 	unstructured.RemoveNestedField(item.Object, "metadata", "generation")
@@ -875,7 +882,10 @@ func (c *Client) DeleteResource(ctx context.Context, namespace, kind, name strin
 	if err != nil {
 		return err
 	}
-	return resource.Delete(queryCtx, name, metav1.DeleteOptions{})
+	if strings.EqualFold(kind, "Pod") {
+		return resource.Delete(queryCtx, name, metav1.DeleteOptions{})
+	}
+	return contractruntime.DeleteManifest(queryCtx, resource, name, "")
 }
 
 func (c *Client) dynamicResource(gvr schema.GroupVersionResource, namespaceScoped bool, namespace string, item *unstructured.Unstructured) (dynamic.ResourceInterface, string, error) {
@@ -1036,13 +1046,14 @@ func (c *Client) GetHelmReleaseValues(ctx context.Context, namespace, name, revi
 		return domainresource.HelmValuesView{}, err
 	}
 	return domainresource.HelmValuesView{
-		Name:        record.release.Name,
-		Namespace:   record.release.Namespace,
-		Revision:    strconv.Itoa(record.release.Version),
-		Content:     content,
-		Original:    content,
-		Editable:    false,
-		DiffEnabled: true,
+		Name:           record.release.Name,
+		Namespace:      record.release.Namespace,
+		Revision:       strconv.Itoa(record.release.Version),
+		Content:        content,
+		Original:       content,
+		Editable:       false,
+		DiffEnabled:    true,
+		AllowedActions: helmrelease.LegacyAllowedActions(record.labels),
 	}, nil
 }
 
@@ -1494,6 +1505,9 @@ func (c *Client) RestartDeployment(ctx context.Context, namespace, name string) 
 	if err != nil {
 		return err
 	}
+	if err := contractruntime.ValidateDirectManifestOwner(deployment); err != nil {
+		return err
+	}
 	if deployment.Spec.Template.Annotations == nil {
 		deployment.Spec.Template.Annotations = map[string]string{}
 	}
@@ -1509,6 +1523,9 @@ func (c *Client) ScaleDeployment(ctx context.Context, namespace, name string, re
 	if err != nil {
 		return err
 	}
+	if err := contractruntime.ValidateDirectManifestOwner(deployment); err != nil {
+		return err
+	}
 	deployment.Spec.Replicas = &replicas
 	_, err = c.typed.AppsV1().Deployments(namespace).Update(queryCtx, deployment, metav1.UpdateOptions{})
 	return err
@@ -1519,6 +1536,9 @@ func (c *Client) RestartStatefulSet(ctx context.Context, namespace, name string)
 	defer cancel()
 	statefulSet, err := c.typed.AppsV1().StatefulSets(namespace).Get(queryCtx, name, metav1.GetOptions{})
 	if err != nil {
+		return err
+	}
+	if err := contractruntime.ValidateDirectManifestOwner(statefulSet); err != nil {
 		return err
 	}
 	if statefulSet.Spec.Template.Annotations == nil {
@@ -1536,6 +1556,9 @@ func (c *Client) ScaleStatefulSet(ctx context.Context, namespace, name string, r
 	if err != nil {
 		return err
 	}
+	if err := contractruntime.ValidateDirectManifestOwner(statefulSet); err != nil {
+		return err
+	}
 	statefulSet.Spec.Replicas = &replicas
 	_, err = c.typed.AppsV1().StatefulSets(namespace).Update(queryCtx, statefulSet, metav1.UpdateOptions{})
 	return err
@@ -1546,6 +1569,9 @@ func (c *Client) RestartDaemonSet(ctx context.Context, namespace, name string) e
 	defer cancel()
 	daemonSet, err := c.typed.AppsV1().DaemonSets(namespace).Get(queryCtx, name, metav1.GetOptions{})
 	if err != nil {
+		return err
+	}
+	if err := contractruntime.ValidateDirectManifestOwner(daemonSet); err != nil {
 		return err
 	}
 	if daemonSet.Spec.Template.Annotations == nil {
@@ -1561,6 +1587,9 @@ func (c *Client) UpdateDeploymentImage(ctx context.Context, namespace, name, con
 	defer cancel()
 	deployment, err := c.typed.AppsV1().Deployments(namespace).Get(queryCtx, name, metav1.GetOptions{})
 	if err != nil {
+		return "", "", err
+	}
+	if err := contractruntime.ValidateDirectManifestOwner(deployment); err != nil {
 		return "", "", err
 	}
 	if len(deployment.Spec.Template.Spec.Containers) == 0 {
@@ -2795,14 +2824,15 @@ func mapHelmRelease(name, namespace string, labels map[string]string, createdAt 
 	chart := strings.TrimSpace(labels["helm.sh/chart"])
 	appVersion := strings.TrimSpace(labels["app.kubernetes.io/version"])
 	return domainresource.HelmReleaseView{
-		Name:          releaseName,
-		Namespace:     namespace,
-		Revision:      revision,
-		Status:        status,
-		Chart:         chart,
-		AppVersion:    appVersion,
-		StorageDriver: storageDriver,
-		AgeSeconds:    secondsSince(createdAt),
+		Name:           releaseName,
+		Namespace:      namespace,
+		Revision:       revision,
+		Status:         status,
+		Chart:          chart,
+		AppVersion:     appVersion,
+		StorageDriver:  storageDriver,
+		AgeSeconds:     secondsSince(createdAt),
+		AllowedActions: helmrelease.LegacyAllowedActions(labels),
 	}
 }
 
@@ -2902,6 +2932,7 @@ func mapHelmReleaseDetailRecord(record helmReleaseRecord) domainresource.HelmRel
 		StorageDriver:     "secret",
 		Description:       description,
 		Labels:            cloneStringMap(record.labels),
+		AllowedActions:    helmrelease.LegacyAllowedActions(record.labels),
 		Annotations:       annotations,
 		AgeSeconds:        secondsSince(record.createdAt),
 		ValuesEditable:    false,
@@ -2929,12 +2960,13 @@ func mapHelmReleaseDetailRecord(record helmReleaseRecord) domainresource.HelmRel
 func mapHelmReleaseHistoryRecord(record helmReleaseRecord) domainresource.HelmReleaseHistoryView {
 	release := record.release
 	item := domainresource.HelmReleaseHistoryView{
-		Name:      release.Name,
-		Namespace: release.Namespace,
-		Revision:  strconv.Itoa(release.Version),
-		Status:    strings.TrimSpace(record.labels["status"]),
-		Chart:     strings.TrimSpace(record.labels["helm.sh/chart"]),
-		CreatedAt: formatHelmTime(record.createdAt),
+		Name:           release.Name,
+		Namespace:      release.Namespace,
+		Revision:       strconv.Itoa(release.Version),
+		Status:         strings.TrimSpace(record.labels["status"]),
+		Chart:          strings.TrimSpace(record.labels["helm.sh/chart"]),
+		CreatedAt:      formatHelmTime(record.createdAt),
+		AllowedActions: helmrelease.LegacyAllowedActions(record.labels),
 	}
 	if release.Chart != nil && release.Chart.Metadata != nil {
 		item.ChartVersion = strings.TrimSpace(release.Chart.Metadata.Version)

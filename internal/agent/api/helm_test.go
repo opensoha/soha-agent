@@ -1,10 +1,33 @@
 package api
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
+	helmruntime "github.com/opensoha/soha-contracts/helmrelease/runtime"
 )
+
+func TestHelmErrorsPreserveConflictWithoutProviderDetails(t *testing.T) {
+	for _, test := range []struct {
+		err    error
+		status int
+	}{
+		{fmt.Errorf("%w: secret provider details", helmruntime.ErrConflict), http.StatusConflict},
+		{fmt.Errorf("secret provider details"), http.StatusBadGateway},
+	} {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		writeHelmError(ctx, test.err)
+		if recorder.Code != test.status || strings.Contains(recorder.Body.String(), "secret provider details") {
+			t.Fatalf("response = %d, %s", recorder.Code, recorder.Body.String())
+		}
+	}
+}
 
 func TestNormalizeHelmRollbackRequest(t *testing.T) {
 	tests := []struct {

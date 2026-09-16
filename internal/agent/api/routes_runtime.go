@@ -1,13 +1,19 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
 	apiresponse "github.com/opensoha/soha-agent/internal/api/response"
+	sohaapi "github.com/opensoha/soha-contracts/gen/go/sohaapi"
 )
+
+type buildpacksCapabilityReader interface {
+	BuildpacksCapability(context.Context, string) sohaapi.BuildpacksCapability
+}
 
 type cancelRuntimeTaskRequest struct {
 	Reason string `json:"reason"`
@@ -25,6 +31,11 @@ func registerRuntimeRoutes(
 	runtimeGroup := router.Group(fmt.Sprintf("%s/runtime", cfg.HTTP.BasePath))
 	runtimeGroup.Use(authAnyMiddleware(cfg.Auth.BearerToken, cfg.ControlPlane.BearerToken))
 	{
+		if reader, ok := runtime.(buildpacksCapabilityReader); ok {
+			runtimeGroup.GET("/buildpacks/capability", func(c *gin.Context) {
+				apiresponse.Item(c, http.StatusOK, reader.BuildpacksCapability(c.Request.Context(), c.Query("applicationId")))
+			})
+		}
 		runtimeGroup.GET("/execution-tasks", func(c *gin.Context) {
 			apiresponse.Items(c, http.StatusOK, runtime.ListActiveTasks())
 		})

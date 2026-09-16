@@ -127,6 +127,12 @@ func redactResolvedSecretText(values map[string]string, text string) string {
 			secrets = append(secrets, value)
 		}
 	}
+	// Registry errors can contain individual credentials rather than the full JSON secret.
+	for _, value := range buildpacksRegistrySecrets(values["REGISTRY_AUTH"]) {
+		if value != "" {
+			secrets = append(secrets, value)
+		}
+	}
 	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
 	for _, secret := range secrets {
 		text = strings.ReplaceAll(text, secret, "[REDACTED]")

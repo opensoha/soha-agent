@@ -69,7 +69,7 @@ func TestRunnerOutpostCheckUsesCoreAndCleansHeaders(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
 			"decision": "allow", "statusCode": 204,
-			"headers": map[string]string{"X-Auth-Request-User": "alice", "Set-Cookie": "unsafe", "X-Soha-Email": "a@example.com\r\nInjected: yes"},
+			"headers": map[string]string{"X-Auth-Request-User": "alice", "Set-Cookie": "unsafe", "X-Soha-Projects": "project-1", "X-Soha-Tags": "tag-1", "X-Soha-Email": "a@example.com\r\nInjected: yes"},
 		}})
 	}))
 	defer server.Close()
@@ -88,7 +88,7 @@ func TestRunnerOutpostCheckUsesCoreAndCleansHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
-	if result.Headers["X-Auth-Request-User"] != "alice" || result.Headers["Set-Cookie"] != "" {
+	if result.Headers["X-Auth-Request-User"] != "alice" || result.Headers["Set-Cookie"] != "" || result.Headers["X-Soha-Projects"] != "project-1" || result.Headers["X-Soha-Tags"] != "tag-1" {
 		t.Fatalf("headers not cleaned: %#v", result.Headers)
 	}
 	if result.Headers["X-Soha-Email"] != "a@example.comInjected: yes" {
@@ -110,6 +110,10 @@ func TestRunnerClaimsAndHeartbeatsOutpostConfiguration(t *testing.T) {
 		case "/api/v1/identity/outposts/runtime/claim":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": config})
 		case "/api/v1/identity/outposts/outpost-1/heartbeat":
+			var heartbeat sohaapi.IdentityOutpostHeartbeatRequest
+			if err := json.NewDecoder(req.Body).Decode(&heartbeat); err != nil || heartbeat.ConfigurationExpiresAt == nil || !heartbeat.ConfigurationExpiresAt.Equal(config.ExpiresAt.Truncate(time.Second)) || heartbeat.RuntimeVersion == "" {
+				t.Errorf("missing applied lease or runtime version: %#v, %v", heartbeat, err)
+			}
 			heartbeats++
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"accepted": true, "desiredConfigurationVersion": 1}})
 		case "/api/v1/identity/outposts/outpost-1/events":
@@ -134,6 +138,55 @@ func TestRunnerClaimsAndHeartbeatsOutpostConfiguration(t *testing.T) {
 	r.heartbeatOutpost(context.Background())
 	if heartbeats != 1 || r.OutpostStatus().LastHeartbeatAt == "" {
 		t.Fatalf("heartbeats = %d, status = %#v", heartbeats, r.OutpostStatus())
+	}
+}
+
+func TestRunnerReportsRejectedConfigurationAndRecovers(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := signedOutpostConfig(t, privateKey, time.Now().UTC(), 1)
+	config.Signature = "invalid"
+	var heartbeat sohaapi.IdentityOutpostHeartbeatRequest
+	events := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch req.URL.Path {
+		case "/api/v1/identity/outposts/runtime/claim":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": config})
+		case "/api/v1/identity/outposts/outpost-1/heartbeat":
+			if err := json.NewDecoder(req.Body).Decode(&heartbeat); err != nil {
+				t.Error(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"accepted": true, "desiredConfigurationVersion": 0}})
+		case "/api/v1/identity/outposts/outpost-1/events":
+			events++
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer server.Close()
+	r := New(cfgpkg.ControlPlaneConfig{BaseURL: server.URL, BearerToken: "test-token", Outpost: cfgpkg.OutpostConfig{Enabled: true, AgentID: "agent-1", ProtocolVersion: "v1", TrustKeyID: "test-key", TrustPublicKey: base64.StdEncoding.EncodeToString(publicKey)}}, zap.NewNop())
+	r.outpost, err = newOutpostRuntime(r.cfg.Outpost.TrustPublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.claimOutpostConfig(context.Background())
+	r.heartbeatOutpost(context.Background())
+	if heartbeat.Status != sohaapi.IdentityOutpostHeartbeatRequestStatusUnavailable || heartbeat.ErrorCode != "configuration_rejected" || heartbeat.ConfigurationVersion != 0 || heartbeat.ConfigurationExpiresAt != nil {
+		t.Fatalf("rejected configuration reported as applied: %#v", heartbeat)
+	}
+	if _, _, _, err := r.outpost.route("app.example.com", "/private", time.Now()); err == nil {
+		t.Fatal("unsigned configuration authorized access")
+	}
+	config = signedOutpostConfig(t, privateKey, time.Now().UTC(), 1)
+	r.claimOutpostConfig(context.Background())
+	config = signedOutpostConfig(t, privateKey, time.Now().UTC().Add(time.Second), 1)
+	r.claimOutpostConfig(context.Background())
+	if !r.OutpostStatus().Ready || r.OutpostStatus().ErrorCode != "" || events != 1 {
+		t.Fatalf("recovery or same-version event suppression failed: status=%#v, events=%d", r.OutpostStatus(), events)
 	}
 }
 

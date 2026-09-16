@@ -34,15 +34,23 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 	}
 	sort.Strings(signatures)
 	routeDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(signatures, "\n"))))
-	if len(signatures) != 146 {
-		t.Fatalf("route count = %d, want 146", len(signatures))
+	if len(signatures) != 248 {
+		t.Fatalf("route count = %d, want 248", len(signatures))
 	}
-	const expectedRouteDigest = "11bf3d5b5432c4687cdfbaeb7b608f601fc2905989f9afc9a7c2ef3f09ed7cfc"
+	const expectedRouteDigest = "abf68b1e67db932a984a6a1f044c24dd36b30ee3652e684fa1ad44dd44615481"
 	if routeDigest != expectedRouteDigest {
 		t.Fatalf("route digest = %s, want %s", routeDigest, expectedRouteDigest)
 	}
 
 	expected := []string{
+		http.MethodPost + " /api/v1/platform/ownership-v1/resources/yaml/preflight",
+		http.MethodPost + " /api/v1/platform/ownership-v2/resources/yaml/preflight",
+		http.MethodPost + " /api/v1/platform/ownership-v2/manifests/rollout/observe",
+		http.MethodPost + " /api/v1/platform/ownership-v2/manifests/rollout/control",
+		http.MethodPost + " /api/v1/platform/extensions/custom-resources/delete-observed",
+		http.MethodPost + " /api/v1/platform/helm/delivery/prepare",
+		http.MethodPost + " /api/v1/platform/helm/delivery/preflight",
+		http.MethodPost + " /api/v1/platform/helm/delivery/observe",
 		http.MethodGet + " /healthz",
 		http.MethodGet + " /api/v1/diagnostics",
 		http.MethodGet + " /api/v1/platform/workloads/pods",

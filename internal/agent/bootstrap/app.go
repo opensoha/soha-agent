@@ -63,6 +63,7 @@ func New(ctx context.Context) (*App, error) {
 	runner := runnerpkg.New(controlPlane, logger)
 	if client != nil {
 		runner.SetManifestExecutor(client, cfg.Kubernetes.ID)
+		runner.SetHelmExecutor(client, cfg.Kubernetes.ID, cfg.Auth.BearerToken)
 	}
 	runner.Start(lifecycleCtx)
 	server := agentapi.New(cfg, logger, client, runner)

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -9,10 +10,19 @@ import (
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
 	apiresponse "github.com/opensoha/soha-agent/internal/api/response"
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
+	helmruntime "github.com/opensoha/soha-contracts/helmrelease/runtime"
 )
 
 type helmReleaseValuesRequest struct {
 	Content string `json:"content"`
+}
+
+func writeHelmError(c *gin.Context, err error) {
+	if errors.Is(err, helmruntime.ErrConflict) {
+		apiresponse.Error(c, http.StatusConflict, "conflict", "Helm release ownership or revision conflicts with this operation")
+		return
+	}
+	writeError(c, err)
 }
 
 func registerHelmRoutes(platform *gin.RouterGroup, client *k8sagent.Client, actions actionPolicy) {
@@ -24,7 +34,7 @@ func registerHelmRoutes(platform *gin.RouterGroup, client *k8sagent.Client, acti
 		}
 		item, err := client.InstallHelmChart(c.Request.Context(), req)
 		if err != nil {
-			writeError(c, err)
+			writeHelmError(c, err)
 			return
 		}
 		apiresponse.Item(c, http.StatusCreated, item)
@@ -43,7 +53,7 @@ func registerHelmRoutes(platform *gin.RouterGroup, client *k8sagent.Client, acti
 		}
 		item, err := client.UpdateHelmReleaseValues(c.Request.Context(), namespace, name, req.Content)
 		if err != nil {
-			writeError(c, err)
+			writeHelmError(c, err)
 			return
 		}
 		apiresponse.Item(c, http.StatusOK, item)
@@ -62,7 +72,7 @@ func registerHelmRoutes(platform *gin.RouterGroup, client *k8sagent.Client, acti
 			}
 			if dryRun {
 				if err := client.DryRunHelmReleaseRollback(c.Request.Context(), namespace, name, req); err != nil {
-					writeError(c, err)
+					writeHelmError(c, err)
 					return
 				}
 				apiresponse.Item(c, http.StatusOK, gin.H{"valid": true})
@@ -70,7 +80,7 @@ func registerHelmRoutes(platform *gin.RouterGroup, client *k8sagent.Client, acti
 			}
 			item, err := client.RollbackHelmRelease(c.Request.Context(), namespace, name, req)
 			if err != nil {
-				writeError(c, err)
+				writeHelmError(c, err)
 				return
 			}
 			apiresponse.Item(c, http.StatusOK, item)
@@ -86,7 +96,7 @@ func registerHelmRoutes(platform *gin.RouterGroup, client *k8sagent.Client, acti
 			return
 		}
 		if err := client.DeleteHelmRelease(c.Request.Context(), namespace, name); err != nil {
-			writeError(c, err)
+			writeHelmError(c, err)
 			return
 		}
 		apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	contractruntime "github.com/opensoha/soha-contracts/resource/runtime"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -40,6 +41,7 @@ func (c *Client) ListCustomResources(ctx context.Context, definition domainresou
 
 func mapCustomResourceMetadata(item metav1.PartialObjectMetadata, definition domainresource.CRDResourceDefinition) domainresource.CustomResourceView {
 	return domainresource.CustomResourceView{
+		UID: string(item.UID), Generation: item.Generation, DeletingAt: customResourceDeletingAt(item.DeletionTimestamp), Finalizers: item.Finalizers,
 		APIVersion: definition.Group + "/" + definition.Version,
 		Kind:       definition.Kind,
 		Name:       item.Name,
@@ -48,6 +50,13 @@ func mapCustomResourceMetadata(item metav1.PartialObjectMetadata, definition dom
 		CreatedAt:  item.CreationTimestamp.Time.UTC().Format(time.RFC3339),
 		AgeSeconds: secondsSince(item.CreationTimestamp.Time),
 	}
+}
+
+func customResourceDeletingAt(value *metav1.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
 }
 
 func (c *Client) GetCustomResourceYAML(ctx context.Context, definition domainresource.CRDResourceDefinition, namespace, name string) (domainresource.ResourceYAMLView, error) {
@@ -79,6 +88,9 @@ func (c *Client) CreateCustomResourceYAML(ctx context.Context, definition domain
 	if err != nil {
 		return domainresource.ResourceYAMLView{}, err
 	}
+	if err := contractruntime.ValidateDirectManifestOwner(item); err != nil {
+		return domainresource.ResourceYAMLView{}, err
+	}
 	resource, _, err := c.customResource(definition, effectiveNamespace, item)
 	if err != nil {
 		return domainresource.ResourceYAMLView{}, err
@@ -104,28 +116,21 @@ func (c *Client) ApplyCustomResourceYAML(ctx context.Context, definition domainr
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if item.GetResourceVersion() == "" {
-		current, err := resource.Get(queryCtx, name, metav1.GetOptions{})
-		if err != nil {
-			return domainresource.ResourceYAMLView{}, err
-		}
-		item.SetResourceVersion(current.GetResourceVersion())
-	}
-	updated, err := resource.Update(queryCtx, item, metav1.UpdateOptions{})
+	updated, err := contractruntime.UpdateManifest(queryCtx, resource, item)
 	if err != nil {
 		return domainresource.ResourceYAMLView{}, err
 	}
 	return renderCustomResourceYAML(definition.Kind, updated)
 }
 
-func (c *Client) DeleteCustomResource(ctx context.Context, definition domainresource.CRDResourceDefinition, namespace, name string) error {
+func (c *Client) DeleteCustomResource(ctx context.Context, definition domainresource.CRDResourceDefinition, namespace, name, expectedUID string) error {
 	resource, _, err := c.customResource(definition, namespace, nil)
 	if err != nil {
 		return err
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return resource.Delete(queryCtx, name, metav1.DeleteOptions{})
+	return contractruntime.DeleteManifest(queryCtx, resource, name, expectedUID)
 }
 
 func (c *Client) customResource(definition domainresource.CRDResourceDefinition, namespace string, item *unstructured.Unstructured) (dynamic.ResourceInterface, string, error) {

@@ -49,7 +49,7 @@ func TestOutpostForwardAuthRoute(t *testing.T) {
 	if recorder.Code != http.StatusNoContent || recorder.Header().Get("X-Soha-User") != "alice" {
 		t.Fatalf("response = %d %#v", recorder.Code, recorder.Header())
 	}
-	if runtime.request.RequestPath != "/private" || runtime.request.Method != "POST" || runtime.request.RequestHost != "app.example.com" || runtime.request.SessionToken != "proxy-session-1" {
+	if runtime.request.OriginalURL != "https://app.example.com/private?from=test" || runtime.request.RequestPath != "/private" || runtime.request.Method != "POST" || runtime.request.RequestHost != "app.example.com" || runtime.request.SessionToken != "proxy-session-1" {
 		t.Fatalf("request = %#v", runtime.request)
 	}
 }

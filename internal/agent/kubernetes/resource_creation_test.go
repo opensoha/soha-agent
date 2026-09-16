@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	ktesting "k8s.io/client-go/testing"
@@ -120,6 +121,68 @@ func TestCreateResourcesCreatesOnlyAfterSuccessfulPreflight(t *testing.T) {
 	}
 	if len(*actions) != 2 {
 		t.Fatalf("create actions = %#v, want dry-run then persistent create", *actions)
+	}
+}
+
+func TestCreateResourcesReturnsOnlyPersistentResponseUID(t *testing.T) {
+	for _, uid := range []string{"created-uid", ""} {
+		t.Run("uid="+uid, func(t *testing.T) {
+			client, _ := newResourceCreationTestClient(t)
+			var dryRuns []bool
+			dynamicClient, ok := client.dynamic.(*dynamicfake.FakeDynamicClient)
+			if !ok {
+				t.Fatalf("dynamic client type = %T", client.dynamic)
+			}
+			dynamicClient.PrependReactor("create", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
+				create, ok := action.(ktesting.CreateActionImpl)
+				if !ok {
+					t.Fatalf("create action type = %T", action)
+				}
+				dryRun := len(create.GetCreateOptions().DryRun) > 0
+				dryRuns = append(dryRuns, dryRun)
+				original, ok := create.GetObject().(*unstructured.Unstructured)
+				if !ok {
+					t.Fatalf("created object type = %T", create.GetObject())
+				}
+				object := original.DeepCopy()
+				object.SetUID(types.UID(uid))
+				if dryRun {
+					object.SetUID("dry-run-uid")
+				}
+				return true, object, nil
+			})
+			document := configMapCreateDocument(0, "platform", "app")
+			document.ResourceRef.UID = "caller-uid"
+			result := client.CreateResources(context.Background(), resourceCreateRequest(document))
+			if result.Status != domainresource.KubernetesResourceCreateBatchStatusSucceeded || result.Items[0].ResourceRef == nil || result.Items[0].ResourceRef.UID != uid {
+				t.Fatalf("creation receipt = %#v, want persistent response UID %q", result, uid)
+			}
+			if len(dryRuns) != 2 || !dryRuns[0] || dryRuns[1] {
+				t.Fatalf("dry-run flags = %v, want dry-run then persistent create", dryRuns)
+			}
+		})
+	}
+}
+
+func TestCreateResourcesRejectsMissingCreateResponse(t *testing.T) {
+	client, _ := newResourceCreationTestClient(t)
+	dynamicClient, ok := client.dynamic.(*dynamicfake.FakeDynamicClient)
+	if !ok {
+		t.Fatalf("dynamic client type = %T", client.dynamic)
+	}
+	dynamicClient.PrependReactor("create", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
+		create, ok := action.(ktesting.CreateActionImpl)
+		if !ok {
+			t.Fatalf("create action type = %T", action)
+		}
+		if len(create.GetCreateOptions().DryRun) > 0 {
+			return true, create.GetObject(), nil
+		}
+		return true, nil, nil
+	})
+	result := client.CreateResources(context.Background(), resourceCreateRequest(configMapCreateDocument(0, "platform", "app")))
+	if result.Status != domainresource.KubernetesResourceCreateBatchStatusFailed || result.Items[0].ResourceRef != nil {
+		t.Fatalf("creation receipt = %#v, want failed without resource evidence", result)
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/opensoha/soha-agent/internal/agent/buildinfo"
+	contractauth "github.com/opensoha/soha-contracts/auth"
 	sohaapi "github.com/opensoha/soha-contracts/gen/go/sohaapi"
 	"go.uber.org/zap"
 )
@@ -46,6 +48,7 @@ type ForwardAuthResult struct {
 type OutpostStatus struct {
 	Enabled              bool   `json:"enabled"`
 	Ready                bool   `json:"ready"`
+	ErrorCode            string `json:"errorCode,omitempty"`
 	OutpostID            string `json:"outpostId,omitempty"`
 	ConfigurationVersion int64  `json:"configurationVersion,omitempty"`
 	DesiredVersion       int64  `json:"desiredConfigurationVersion,omitempty"`
@@ -59,16 +62,18 @@ type OutpostStatus struct {
 }
 
 type outpostRuntime struct {
-	mu                sync.RWMutex
-	config            *sohaapi.IdentityOutpostRuntimeConfig
-	publicKey         ed25519.PublicKey
-	lastClaimAt       time.Time
-	lastHeartbeatAt   time.Time
-	claimFailures     int64
-	heartbeatFailures int64
-	checkFailures     int64
-	denied            int64
-	desiredVersion    int64
+	mu                 sync.RWMutex
+	config             *sohaapi.IdentityOutpostRuntimeConfig
+	publicKey          ed25519.PublicKey
+	lastClaimAt        time.Time
+	lastHeartbeatAt    time.Time
+	claimFailures      int64
+	heartbeatFailures  int64
+	checkFailures      int64
+	denied             int64
+	desiredVersion     int64
+	contactOutpostID   string
+	configurationError string
 }
 
 func newOutpostRuntime(encodedPublicKey string) (*outpostRuntime, error) {
@@ -118,6 +123,7 @@ func (r *Runner) claimOutpostConfig(ctx context.Context) {
 	config, err := r.apiClient().ClaimIdentityOutpostConfig(ctx, sohaapi.IdentityOutpostClaimRequest{
 		AgentID: r.cfg.Outpost.AgentID, CurrentConfigurationVersion: current,
 		SupportedProtocolVersion: r.cfg.Outpost.ProtocolVersion,
+		RuntimeVersion:           buildinfo.Version,
 	})
 	if err != nil {
 		r.outpost.markClaimFailure()
@@ -126,11 +132,21 @@ func (r *Runner) claimOutpostConfig(ctx context.Context) {
 	if config == nil {
 		return
 	}
+	// The authenticated claim identifies the heartbeat target, even if its signed
+	// configuration cannot be applied. It grants no routing authority.
+	r.outpost.mu.Lock()
+	r.outpost.contactOutpostID = config.OutpostID
+	r.outpost.mu.Unlock()
 	if err := r.outpost.apply(*config, r.cfg.Outpost.TrustKeyID, time.Now()); err != nil {
-		r.outpost.markClaimFailure()
+		r.outpost.mu.Lock()
+		r.outpost.claimFailures++
+		r.outpost.configurationError = "configuration_rejected"
+		r.outpost.mu.Unlock()
 		return
 	}
-	r.reportOutpostEvent(ctx, sohaapi.ConfigurationApplied, "configuration_applied", "")
+	if config.ConfigurationVersion != current {
+		r.reportOutpostEvent(ctx, sohaapi.ConfigurationApplied, "configuration_applied", "")
+	}
 }
 
 func (r *Runner) heartbeatOutpost(ctx context.Context) {
@@ -139,14 +155,20 @@ func (r *Runner) heartbeatOutpost(ctx context.Context) {
 		return
 	}
 	state := sohaapi.IdentityOutpostHeartbeatRequestStatusHealthy
-	errorCode := ""
+	errorCode := status.ErrorCode
 	if !status.Ready {
 		state = sohaapi.IdentityOutpostHeartbeatRequestStatusUnavailable
-		errorCode = "configuration_unavailable"
+		if errorCode == "" {
+			errorCode = "configuration_unavailable"
+		}
+	}
+	var expiresAt *time.Time
+	if parsed, err := time.Parse(time.RFC3339, status.ExpiresAt); err == nil {
+		expiresAt = &parsed
 	}
 	response, err := r.apiClient().HeartbeatIdentityOutpost(ctx, status.OutpostID, sohaapi.IdentityOutpostHeartbeatRequest{
 		AgentID: r.cfg.Outpost.AgentID, CheckedAt: time.Now().UTC(), ConfigurationVersion: status.ConfigurationVersion,
-		Status: state, ErrorCode: errorCode,
+		Status: state, ErrorCode: errorCode, RuntimeVersion: buildinfo.Version, ConfigurationExpiresAt: expiresAt,
 	})
 	if err == nil {
 		r.outpost.markDesiredVersion(response.DesiredConfigurationVersion)
@@ -284,6 +306,7 @@ func (o *outpostRuntime) apply(config sohaapi.IdentityOutpostRuntimeConfig, trus
 	}
 	copy := config
 	o.config = &copy
+	o.configurationError = ""
 	o.desiredVersion = config.ConfigurationVersion
 	o.lastClaimAt = now.UTC()
 	return nil
@@ -307,7 +330,7 @@ func outpostConfigPayload(config sohaapi.IdentityOutpostRuntimeConfig) []byte {
 func (o *outpostRuntime) route(host, requestPath string, now time.Time) (sohaapi.IdentityOutpostRuntimeConfig, sohaapi.IdentityOutpostRoute, bool, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	if o.config == nil || !now.Before(o.config.ExpiresAt) {
+	if o.config == nil || o.configurationError != "" || !now.Before(o.config.ExpiresAt) {
 		return sohaapi.IdentityOutpostRuntimeConfig{}, sohaapi.IdentityOutpostRoute{}, false, errOutpostUnavailable
 	}
 	host = strings.ToLower(strings.TrimSpace(strings.Split(host, ":")[0]))
@@ -338,8 +361,12 @@ func (o *outpostRuntime) status(now time.Time) OutpostStatus {
 	defer o.mu.RUnlock()
 	status := OutpostStatus{Enabled: true, ClaimFailures: o.claimFailures, HeartbeatFailures: o.heartbeatFailures, CheckFailures: o.checkFailures, Denied: o.denied}
 	status.DesiredVersion = o.desiredVersion
+	status.OutpostID, status.ErrorCode = o.contactOutpostID, o.configurationError
 	if o.config != nil {
-		status.Ready = now.Before(o.config.ExpiresAt)
+		status.Ready = o.configurationError == "" && now.Before(o.config.ExpiresAt)
+		if !now.Before(o.config.ExpiresAt) {
+			status.ErrorCode = "configuration_expired"
+		}
 		status.OutpostID = o.config.OutpostID
 		status.ConfigurationVersion = o.config.ConfigurationVersion
 		status.ExpiresAt = o.config.ExpiresAt.UTC().Format(time.RFC3339)
@@ -369,12 +396,11 @@ func (o *outpostRuntime) markDesiredVersion(version int64) {
 }
 
 func cleanOutpostHeaders(headers map[string]string) map[string]string {
-	allowed := map[string]bool{"x-auth-request-user": true, "x-auth-request-email": true, "x-auth-request-groups": true, "x-soha-user": true, "x-soha-email": true, "x-soha-groups": true}
 	clean := make(map[string]string, len(headers))
 	for name, value := range headers {
 		name = http.CanonicalHeaderKey(strings.TrimSpace(name))
 		value = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", ""), "\n", ""))
-		if allowed[strings.ToLower(name)] && value != "" && len(value) <= 4096 {
+		if contractauth.IsOutpostIdentityHeader(name) && value != "" && len(value) <= 4096 {
 			clean[name] = value
 		}
 	}

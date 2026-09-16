@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -57,5 +58,21 @@ func TestValidSecretEnvironmentAliasRejectsExecutionOverrides(t *testing.T) {
 	}
 	if !validSecretEnvironmentAlias("REGISTRY_TOKEN") {
 		t.Error("validSecretEnvironmentAlias(REGISTRY_TOKEN) = false")
+	}
+}
+
+func TestSecretLeaseRedactsRegistryCredentialFragments(t *testing.T) {
+	auth := base64.StdEncoding.EncodeToString([]byte("user:encoded-password"))
+	value := `{"auths":{"registry.example":{"auth":"` + auth + `"},"other.example":{"password":"plain-password","identitytoken":"identity-token"}}}`
+	ctx := context.WithValue(context.Background(), secretValuesContextKey{}, map[string]string{"REGISTRY_AUTH": value})
+	logs := []string{value, "Basic " + auth, "user:encoded-password", "encoded-password plain-password identity-token"}
+	result, _ := json.Marshal(redactResolvedSecretValues(ctx, map[string]any{"logs": logs}))
+	for _, secret := range []string{auth, "encoded-password", "plain-password", "identity-token"} {
+		if strings.Contains(string(result), secret) {
+			t.Fatalf("registry credential fragment was not redacted: %s", result)
+		}
+	}
+	if !strings.Contains(string(result), "[REDACTED]") {
+		t.Fatalf("redaction marker missing: %s", result)
 	}
 }

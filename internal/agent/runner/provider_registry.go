@@ -514,9 +514,12 @@ func (r *DynamicAgentProviderRegistry) Resolve(id, version string) (AgentProvide
 	return AgentProviderDefinition{}, false
 }
 
-func (r *DynamicAgentProviderRegistry) Acquire(id, version string) (AgentProviderDefinition, error) {
+func (r *DynamicAgentProviderRegistry) Acquire(id, version string, revision ...uint64) (AgentProviderDefinition, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if len(revision) > 0 && (revision[0] == 0 || revision[0] != r.current.Revision) {
+		return AgentProviderDefinition{}, fmt.Errorf("selected agent catalog revision is no longer active")
+	}
 	for _, provider := range r.current.Providers {
 		if !strings.EqualFold(provider.ID, strings.TrimSpace(id)) || (version != "" && provider.ProviderVersion != version) {
 			continue

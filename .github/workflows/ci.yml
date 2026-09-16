@@ -35,7 +35,9 @@ jobs:
         run: GOWORK=off go mod verify
       - name: Test
         working-directory: soha-agent
-        run: GOWORK=off go test ./...
+        run: |
+          GOWORK=off go test ./...
+          python3 deploy/hermes-tools/test_plugin.py
       - name: Race test
         working-directory: soha-agent
         run: GOWORK=off go test -race ./...
@@ -67,3 +69,9 @@ jobs:
       - name: Hermes runner Docker build
         working-directory: soha-agent
         run: docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile.hermes-agent-runner -t ghcr.io/opensoha/soha-hermes-agent:test .
+      - name: Buildpacks runner Docker build
+        working-directory: soha-agent
+        run: docker build --build-context contracts=../soha-contracts --target buildpacks-runtime -f deploy/Dockerfile -t ghcr.io/opensoha/soha-buildpacks-agent:test .
+      - name: Daemonless Buildpacks runner Docker build
+        working-directory: soha-agent
+        run: docker build --build-context contracts=../soha-contracts --target buildpacks-daemonless-runtime -f deploy/Dockerfile -t ghcr.io/opensoha/soha-buildpacks-agent:daemonless-test .

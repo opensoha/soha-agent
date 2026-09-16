@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	helmruntime "github.com/opensoha/soha-contracts/helmrelease/runtime"
+
 	"helm.sh/helm/v4/pkg/action"
 	"helm.sh/helm/v4/pkg/chart/loader"
 	"helm.sh/helm/v4/pkg/cli"
@@ -123,6 +125,9 @@ func (c *Client) UpdateHelmReleaseValues(ctx context.Context, namespace, name, c
 	if currentV1 == nil || currentV1.Chart == nil {
 		return domainresource.HelmValuesView{}, fmt.Errorf("helm release %s has no chart payload", name)
 	}
+	if currentV1.Labels["soha-delivery-owner"] != "" {
+		return domainresource.HelmValuesView{}, fmt.Errorf("application Helm releases require a delivery plan to change values")
+	}
 	upgrader := action.NewUpgrade(actionConfig)
 	upgrader.Namespace = namespace
 	upgrader.ResetValues = true
@@ -159,6 +164,9 @@ func (c *Client) DeleteHelmRelease(ctx context.Context, namespace, name string) 
 		return err
 	}
 	uninstaller := action.NewUninstall(actionConfig)
+	if err := helmruntime.RequireUnmanaged(actionConfig, name); err != nil {
+		return err
+	}
 	uninstaller.WaitStrategy = kube.LegacyStrategy
 	uninstaller.Timeout = time.Duration(defaultAgentHelmTimeoutSeconds) * time.Second
 	if _, err := uninstaller.Run(name); err != nil {
@@ -186,6 +194,9 @@ func (c *Client) rollbackHelmRelease(ctx context.Context, namespace, name string
 		return domainresource.HelmReleaseDetailView{}, err
 	}
 	rollback := action.NewRollback(actionConfig)
+	if err := helmruntime.RequireUnmanaged(actionConfig, strings.TrimSpace(name)); err != nil {
+		return domainresource.HelmReleaseDetailView{}, err
+	}
 	rollback.Version = input.Revision
 	rollback.Timeout = time.Duration(input.TimeoutSeconds) * time.Second
 	rollback.WaitForJobs = input.Wait

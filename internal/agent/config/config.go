@@ -74,6 +74,7 @@ type ControlPlaneConfig struct {
 	AgentRuntime    AgentRuntimeConfig  `mapstructure:"agent_runtime"`
 	Outpost         OutpostConfig       `mapstructure:"outpost"`
 	Session         SessionConfig       `mapstructure:"session"`
+	Buildpacks      BuildpacksConfig    `mapstructure:"buildpacks"`
 }
 
 type SessionConfig struct {
@@ -123,6 +124,10 @@ type AgentRuntimeConfig struct {
 }
 
 type AgentProviderConfig struct {
+	CAFile           string   `mapstructure:"ca_file" json:"-"`
+	Endpoint         string   `mapstructure:"endpoint"`
+	BearerToken      string   `mapstructure:"bearer_token" json:"-"`
+	BearerTokenFile  string   `mapstructure:"bearer_token_file" json:"-"`
 	Command          string   `mapstructure:"command"`
 	Args             []string `mapstructure:"args"`
 	PromptArg        string   `mapstructure:"prompt_arg"`
@@ -231,6 +236,9 @@ func Validate(cfg Config) error {
 	if err := validateAgentSessionConfig(cfg.ControlPlane); err != nil {
 		return err
 	}
+	if err := validateBuildpacksConfig(cfg); err != nil {
+		return err
+	}
 	return validateOutpostConfig(cfg.ControlPlane)
 }
 
@@ -309,6 +317,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("control_plane.callback_retry.backoff", "500ms")
 	v.SetDefault("control_plane.provider_kinds", []string{"ci_agent_runner"})
 	v.SetDefault("control_plane.workspace_root", ".")
+	setBuildpacksDefaults(v)
 	v.SetDefault("control_plane.docker.enabled", false)
 	v.SetDefault("control_plane.docker.worker_id", "")
 	v.SetDefault("control_plane.docker.host_ids", []string{})

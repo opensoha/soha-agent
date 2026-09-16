@@ -19,11 +19,20 @@ func resolveBearerTokenFiles(cfg *Config) error {
 	); err != nil {
 		return err
 	}
-	return resolveBearerTokenFile(
+	if err := resolveBearerTokenFile(
 		"control_plane",
 		&cfg.ControlPlane.BearerToken,
 		&cfg.ControlPlane.BearerTokenFile,
-	)
+	); err != nil {
+		return err
+	}
+	for id, provider := range cfg.ControlPlane.AgentRuntime.Providers {
+		if err := resolveBearerTokenFile("control_plane.agent_runtime.providers."+id, &provider.BearerToken, &provider.BearerTokenFile); err != nil {
+			return err
+		}
+		cfg.ControlPlane.AgentRuntime.Providers[id] = provider
+	}
+	return nil
 }
 
 func resolveBearerTokenFile(section string, token, tokenFile *string) error {

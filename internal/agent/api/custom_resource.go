@@ -15,12 +15,7 @@ type customResourceListRequest struct {
 	Namespace  string                               `json:"namespace"`
 }
 
-type customResourceYAMLRequest struct {
-	Definition domainresource.CRDResourceDefinition `json:"definition"`
-	Namespace  string                               `json:"namespace"`
-	Name       string                               `json:"name,omitempty"`
-	Content    string                               `json:"content,omitempty"`
-}
+type customResourceYAMLRequest = domainresource.CustomResourceYAMLRequest
 
 func registerCustomResourceRoutes(platform *gin.RouterGroup, client *k8sagent.Client, actions actionPolicy) {
 	platform.POST("/extensions/custom-resources/list", actions.Require(actionPlatformCustomResourcesList), func(c *gin.Context) {
@@ -75,18 +70,21 @@ func registerCustomResourceRoutes(platform *gin.RouterGroup, client *k8sagent.Cl
 		}
 		apiresponse.Item(c, http.StatusOK, item)
 	})
-	platform.DELETE("/extensions/custom-resources", actions.Require(actionPlatformCustomResourcesDelete), func(c *gin.Context) {
+	deleteObserved := func(c *gin.Context) {
 		var req customResourceYAMLRequest
 		if err := c.ShouldBindJSON(&req); err != nil || invalidCRDDefinition(req.Definition) || strings.TrimSpace(req.Name) == "" {
 			apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "definition and name are required")
 			return
 		}
-		if err := client.DeleteCustomResource(c.Request.Context(), req.Definition, req.Namespace, req.Name); err != nil {
+		if err := client.DeleteCustomResource(c.Request.Context(), req.Definition, req.Namespace, req.Name, req.ExpectedUID); err != nil {
 			writeError(c, err)
 			return
 		}
-		apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
-	})
+		apiresponse.JSON(c, http.StatusOK, gin.H{"status": "accepted"})
+	}
+	platform.DELETE("/extensions/custom-resources", actions.Require(actionPlatformCustomResourcesDelete), deleteObserved)
+	// Separate endpoint makes older Agents fail closed instead of ignoring UID fences.
+	platform.POST("/extensions/custom-resources/delete-observed", actions.Require(actionPlatformCustomResourcesDelete), deleteObserved)
 }
 
 func invalidCRDDefinition(definition domainresource.CRDResourceDefinition) bool {

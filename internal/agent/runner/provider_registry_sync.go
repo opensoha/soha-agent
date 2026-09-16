@@ -66,6 +66,7 @@ func (r *Runner) syncAgentProviderRegistry(ctx context.Context) {
 		return
 	}
 	result := r.applyAgentProviderRegistrySnapshot(ctx, snapshot, time.Now().UTC())
+	r.refreshProviderHealth(ctx)
 	ack := providerRegistryAcknowledgement{
 		RunnerID:          runnerID,
 		Revision:          result.Revision,

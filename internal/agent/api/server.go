@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	resourceruntime "github.com/opensoha/soha-contracts/resource/runtime"
 	"io"
 	"net/http"
 	"strconv"
@@ -60,6 +62,7 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 	registerSystemRoutes(router, cfg, client, runtime)
 	registerPlatformRoutes(router, cfg, client, actions)
 	registerRuntimeRoutes(router, cfg, runtime, actions)
+	registerAgentToolRoutes(router, cfg, runtime)
 	registerDockerRuntimeRoutes(router, cfg, logger, actions)
 	registerOutpostRoutes(router, cfg, runtime)
 
@@ -100,6 +103,7 @@ func registerPlatformRoutes(router *gin.Engine, cfg cfgpkg.Config, client *k8sag
 		origins,
 	)
 	registerHelmRoutes(platform, client, actions)
+	registerHelmDeliveryRoutes(platform, client, cfg.Kubernetes.ID)
 	registerPodStreamRoutes(platform, client)
 	registerAggregateLogRoutes(platform, client)
 	registerPodTerminalRoutes(platform, client, actions, origins)
@@ -111,6 +115,15 @@ func registerPlatformRoutes(router *gin.Engine, cfg cfgpkg.Config, client *k8sag
 	registerPlatformStorageRoutes(platform, client)
 	registerPlatformHelmReadRoutes(platform, client)
 	registerPlatformWorkloadMutationRoutes(platform, client, actions)
+	// A distinct route family makes old Agents fail closed during rolling upgrades.
+	for _, version := range []string{"/ownership-v1", "/ownership-v2"} {
+		owned := platform.Group(version)
+		registerResourceYAMLRoutes(owned, client, actions)
+		registerCustomResourceRoutes(owned, client, actions)
+		registerPlatformWorkloadRoutes(owned, client, actions)
+		registerPlatformWorkloadMutationRoutes(owned, client, actions)
+	}
+	registerManifestRolloutRoutes(platform.Group("/ownership-v2"), client, cfg.Kubernetes.ID, actions)
 }
 
 func (s *Server) Run() error {
@@ -125,7 +138,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-func writeError(c *gin.Context, _ error) {
+func writeError(c *gin.Context, err error) {
+	if errors.Is(err, resourceruntime.ErrResourceOwnership) {
+		apiresponse.Error(c, http.StatusConflict, "resource_ownership_conflict", "resource is externally managed or being deleted; use its delivery owner")
+		return
+	}
 	apiresponse.Error(c, http.StatusBadGateway, "cluster_unavailable", "cluster request failed")
 }
 

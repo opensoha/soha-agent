@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -56,6 +58,40 @@ func TestDockerOperationStopsWhenInitialCallbackReturnsTerminalState(t *testing.
 	runner.executeDockerOperation(context.Background(), operation)
 	if callbackCount != 1 {
 		t.Fatalf("callback count = %d, want one terminal-state check", callbackCount)
+	}
+}
+
+func TestDockerCommandDoesNotStartWithoutControlPlaneConfirmation(t *testing.T) {
+	for _, scenario := range []string{"unreachable", "denied", "different-operation", "missing-status"} {
+		t.Run(scenario, func(t *testing.T) {
+			bin := t.TempDir()
+			marker := filepath.Join(t.TempDir(), "command-started")
+			//nolint:gosec // isolated fake command; no Docker daemon is contacted.
+			if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\ncase \"$*\" in\n  *\" up \"*) touch \"$SOHA_TEST_COMMAND_MARKER\" ;;\nesac\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("SOHA_TEST_COMMAND_MARKER", marker)
+			operation := DockerOperation{ID: "original", OperationKind: "project_deploy", Payload: map[string]any{"action": "deploy", "composeContent": "services: {}"}}
+			runner := New(cfgpkg.ControlPlaneConfig{BaseURL: "http://control-plane", BearerToken: "test", CallbackRetry: cfgpkg.CallbackRetryConfig{MaxAttempts: 1, Backoff: time.Millisecond}, Docker: cfgpkg.DockerRunnerConfig{OperationKinds: []string{"project_deploy"}, ComposeRoot: t.TempDir()}}, zap.NewNop())
+			runner.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				if scenario == "unreachable" {
+					return nil, context.DeadlineExceeded
+				}
+				if scenario == "denied" {
+					return jsonResponse(t, http.StatusForbidden, nil), nil
+				}
+				remote := operation
+				if scenario == "different-operation" {
+					remote.ID, remote.Status = "other", "running"
+				}
+				return jsonResponse(t, http.StatusAccepted, map[string]any{"data": remote}), nil
+			})}
+			runner.executeDockerOperation(context.Background(), operation)
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("command ran without authorization: %v", err)
+			}
+		})
 	}
 }
 
@@ -467,5 +503,64 @@ func TestDockerOperationKindAllowedRequiresExplicitAllowlist(t *testing.T) {
 				t.Fatalf("dockerOperationKindAllowed(%v, %q) = %t, want %t", tc.allowed, tc.kind, got, tc.wantAllow)
 			}
 		})
+	}
+}
+
+func TestDockerCancellationAcknowledgmentFollowsStoppedCommand(t *testing.T) {
+	binDir := t.TempDir()
+	pidFile := filepath.Join(t.TempDir(), "command-pid")
+	//nolint:gosec // isolated fake command only; it never invokes a Docker daemon.
+	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(`#!/bin/sh
+case "$*" in
+  "compose -f compose.yaml up -d")
+    echo $$ > "$SOHA_TEST_COMMAND_PID"
+    exec sleep 120
+    ;;
+  *) echo "test-runtime" ;;
+esac
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SOHA_TEST_COMMAND_PID", pidFile)
+	operation := DockerOperation{ID: "cancel-in-flight", OperationKind: "project_deploy", ProjectID: "project-1", CallbackToken: strings.Repeat("x", 40), Payload: map[string]any{"action": "deploy", "projectSlug": "cancel-test", "composeContent": "services: {}"}}
+	acknowledged, requested := false, false
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/api/v1/docker/operation-callbacks" {
+			t.Errorf("unexpected request %s", request.URL.Path)
+			return jsonResponse(t, 500, nil), nil
+		}
+		var callback dockerCallbackRequest
+		if err := json.NewDecoder(request.Body).Decode(&callback); err != nil {
+			t.Error(err)
+		}
+		remote := operation
+		remote.Status = "running"
+		// #nosec G304 -- PID file belongs to the isolated fake command in t.TempDir.
+		pidData, started := os.ReadFile(pidFile)
+		if started == nil {
+			remote.Status, requested = "canceling", true
+		}
+		if callback.Status == "canceled" {
+			if !requested || !callback.CancellationAcknowledged || callback.CallbackToken != operation.CallbackToken {
+				t.Error("cancellation acknowledgment is missing its request or attempt")
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+			if err != nil {
+				t.Error(err)
+			} else if err := syscall.Kill(pid, 0); err == nil {
+				t.Error("runner acknowledged before command exited")
+			}
+			remote.Status, acknowledged = "canceled", true
+		}
+		return jsonResponse(t, http.StatusAccepted, map[string]any{"data": remote}), nil
+	})
+	r := New(cfgpkg.ControlPlaneConfig{BaseURL: "http://control-plane", BearerToken: "test-runner-token", CallbackRetry: cfgpkg.CallbackRetryConfig{MaxAttempts: 1, Backoff: time.Millisecond}, Docker: cfgpkg.DockerRunnerConfig{OperationKinds: []string{"project_deploy"}, ComposeRoot: t.TempDir()}}, zap.NewNop())
+	r.httpClient = &http.Client{Transport: transport}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	r.executeDockerOperation(ctx, operation)
+	if !acknowledged {
+		t.Fatal("runner did not acknowledge stopped commands")
 	}
 }

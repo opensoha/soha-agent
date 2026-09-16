@@ -656,6 +656,7 @@ echo '{"summary":"should not complete"}'
 	var runningCallbacks int32
 	var completedCallbacks int32
 	var failedCallbacks int32
+	var cancellationAcks int32
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/api/v1/copilot/agent-runs/callback" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
@@ -670,6 +671,12 @@ echo '{"summary":"should not complete"}'
 			if atomic.AddInt32(&runningCallbacks, 1) >= 2 {
 				status = "canceled"
 			}
+		case "canceled":
+			if req.Payload["cancellationAcknowledged"] != true {
+				t.Fatal("missing execution-end acknowledgement")
+			}
+			atomic.AddInt32(&cancellationAcks, 1)
+			status = "canceled"
 		case "completed":
 			atomic.AddInt32(&completedCallbacks, 1)
 		case "failed", "callback_timeout":
@@ -712,6 +719,9 @@ echo '{"summary":"should not complete"}'
 	}
 	if atomic.LoadInt32(&runningCallbacks) < 2 {
 		t.Fatalf("expected streamed heartbeat before cancellation, got %d", runningCallbacks)
+	}
+	if atomic.LoadInt32(&cancellationAcks) != 1 {
+		t.Fatal("runner did not acknowledge cancellation after stopping")
 	}
 }
 

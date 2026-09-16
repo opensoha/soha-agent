@@ -304,3 +304,35 @@ func jsonResponse(t *testing.T, status int, payload any) *http.Response {
 		Body:       io.NopCloser(strings.NewReader(string(raw))),
 	}
 }
+
+func TestAgentRuntimeLoopRunsTwoTasksWithinSharedConcurrencyLimit(t *testing.T) {
+	runner := New(cfgpkg.ControlPlaneConfig{BaseURL: "http://control.test", BearerToken: "token", MaxConcurrency: 2, PollInterval: time.Millisecond}, zap.NewNop())
+	var claims atomic.Int32
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	runner.httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(request.URL.Path, "/claim") {
+			claims.Add(1)
+			return jsonResponse(t, http.StatusAccepted, map[string]any{"data": AgentRun{ID: "run", ProviderID: "hermes", CapabilityID: "general", CallbackToken: "token"}}), nil
+		}
+		started <- struct{}{}
+		<-release
+		return jsonResponse(t, http.StatusOK, map[string]any{"data": AgentRun{ID: "run", Status: "canceled"}}), nil
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer close(release)
+	go runner.agentRuntimeLoop(ctx)
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("second agent run could not start while first was active")
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := claims.Load(); got != 2 {
+		t.Fatalf("claimed %d runs with only two execution slots", got)
+	}
+	cancel()
+}

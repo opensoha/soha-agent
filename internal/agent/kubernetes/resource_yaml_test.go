@@ -137,8 +137,10 @@ func TestDeleteResourceDeletesDynamicResource(t *testing.T) {
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
 		"metadata": map[string]any{
-			"name":      "app-config",
-			"namespace": "platform",
+			"name":            "app-config",
+			"namespace":       "platform",
+			"uid":             "config-uid",
+			"resourceVersion": "1",
 		},
 	}}
 	client := &Client{dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{

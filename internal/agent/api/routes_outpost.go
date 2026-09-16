@@ -41,6 +41,18 @@ func registerOutpostRoutes(router *gin.Engine, cfg cfgpkg.Config, runtime Runtim
 		if host == "" {
 			host = c.Request.Host
 		}
+		if !parsed.IsAbs() {
+			proto := firstHeader(c, "X-Forwarded-Proto")
+			if proto == "" {
+				proto = "https"
+			}
+			if proto != "http" && proto != "https" {
+				apiresponse.Error(c, http.StatusBadRequest, "invalid_request", "forward-auth request is invalid")
+				return
+			}
+			parsed.Scheme, parsed.Host = proto, host
+			originalURL = parsed.String()
+		}
 		requestPath := parsed.Path
 		if requestPath == "" {
 			requestPath = "/"

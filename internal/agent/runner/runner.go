@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	resourceruntime "github.com/opensoha/soha-contracts/resource/runtime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
@@ -107,8 +109,13 @@ type Runner struct {
 	providerRegistry    *DynamicAgentProviderRegistry
 	providerConformance AgentProviderConformanceProbe
 	outpost             *outpostRuntime
+	helmExecutor        HelmExecutor
+	helmClusterID       string
+	helmClaimToken      string
 	manifestExecutor    ManifestExecutor
 	manifestClusterID   string
+	chatToolGrants      sync.Map
+	buildpacksBlocked   atomic.Bool
 }
 
 type ManifestExecutor interface {
@@ -209,7 +216,7 @@ func New(cfg cfgpkg.ControlPlaneConfig, logger *zap.Logger) *Runner {
 	if err != nil {
 		panic(fmt.Sprintf("invalid built-in agent provider registry: %v", err))
 	}
-	return &Runner{
+	runner := &Runner{
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
@@ -220,6 +227,8 @@ func New(cfg cfgpkg.ControlPlaneConfig, logger *zap.Logger) *Runner {
 		metrics:          &runnerMetrics{},
 		providerRegistry: providerRegistry,
 	}
+	runner.providerConformance = runnerProviderProbe{runner: runner}
+	return runner
 }
 
 func (r *Runner) SetManifestExecutor(executor ManifestExecutor, clusterID string) {
@@ -430,7 +439,7 @@ func (r *Runner) Start(ctx context.Context) {
 	if !r.cfg.Enabled || strings.TrimSpace(r.cfg.BaseURL) == "" || strings.TrimSpace(r.cfg.BearerToken) == "" {
 		return
 	}
-	if len(r.cfg.ProviderKinds) > 0 {
+	if len(r.cfg.ProviderKinds) > 0 || r.cfg.Buildpacks.Enabled {
 		go r.loop(ctx)
 	}
 	if r.cfg.Docker.Enabled {
@@ -462,7 +471,7 @@ func (r *Runner) loop(ctx context.Context) {
 			}
 			go func(current ExecutionTask) {
 				defer r.releaseExecutionSlot()
-				r.execute(ctx, current)
+				r.executeClaimedTask(ctx, current)
 			}(task)
 		}
 	}
@@ -509,19 +518,35 @@ func (r *Runner) agentRuntimeLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			run, ok := r.claimAgentRun(ctx)
-			if !ok {
+			if !r.tryAcquireExecutionSlot() {
 				continue
 			}
-			r.executeAgentRun(ctx, run)
+			run, ok := r.claimAgentRun(ctx)
+			if !ok {
+				r.releaseExecutionSlot()
+				continue
+			}
+			go func(current AgentRun) {
+				defer r.releaseExecutionSlot()
+				r.executeAgentRun(ctx, current)
+			}(run)
 		}
 	}
 }
 
 func (r *Runner) claim(ctx context.Context) (ExecutionTask, bool) {
+	if r.cfg.Buildpacks.Enabled && r.buildpacksBlocked.Load() {
+		return ExecutionTask{}, false
+	}
+	if task, ok := r.claimHelmTask(ctx); ok {
+		return task, true
+	}
 	providerKinds := append([]string(nil), r.cfg.ProviderKinds...)
+	if r.cfg.Buildpacks.Enabled {
+		providerKinds = []string{"buildpacks_runner." + r.cfg.AgentID}
+	}
 	if r.manifestExecutor != nil && r.manifestClusterID != "" {
-		providerKinds = append(providerKinds, "manifest_agent."+r.manifestClusterID)
+		providerKinds = append(providerKinds, "manifest_agent."+r.manifestClusterID, resourceruntime.ManifestAgentProviderPrefix+r.manifestClusterID)
 	}
 	task, err := r.apiClient().ClaimExecutionTask(ctx, claimRequest{
 		AgentID:         firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent"),
@@ -585,6 +610,13 @@ func (r *Runner) claimDockerOperation(ctx context.Context) (DockerOperation, boo
 }
 
 func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
+	if strings.HasPrefix(task.TaskKind, "helm_") {
+		taskCtx, cancel := r.executionTaskContext(ctx, task)
+		defer cancel()
+		r.metrics.markStarted(metricScopeExecution)
+		r.executeHelmTask(taskCtx, task)
+		return
+	}
 	agentID := firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent")
 	r.metrics.markStarted(metricScopeExecution)
 	secretCtx, err := r.redeemSecretLease(ctx, task.SecretLease, agentID)
@@ -611,7 +643,6 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 		return
 	}
 
-	logs := make([]string, 0, len(commands)*3)
 	commandCount := len(commands)
 	r.registerActiveTask(task, cancelTask)
 	defer r.unregisterActiveTask(task.ID)
@@ -621,7 +652,6 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 
 	workspacePath, commandDir, workspaceArtifacts, workspaceLogs, workspaceErr := r.prepareWorkspace(taskCtx, task)
 	if len(workspaceLogs) > 0 {
-		logs = append(logs, workspaceLogs...)
 		r.updateActiveTask(task.ID, func(item *ActiveTask) {
 			item.Status = "running"
 			item.WorkspacePath = workspacePath
@@ -666,153 +696,7 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 	}
 
 	for index, command := range commands {
-		pipelineStage := commandPipelineStage(command)
-		r.updateActiveTask(task.ID, func(item *ActiveTask) {
-			item.Status = "running"
-			item.CurrentCommand = command
-			item.CommandIndex = index + 1
-			item.CommandCount = commandCount
-			item.WorkspacePath = workspacePath
-		})
-		remoteTask, ok := r.callback(taskCtx, task, "running", extendMap(
-			buildHeartbeatPayload(agentID, command, index+1, commandCount),
-			map[string]any{"workspacePath": workspacePath, "pipelineStage": pipelineStage},
-		))
-		if ok && shouldStopLocalExecution(remoteTask.Status) {
-			return
-		}
-		commandLogs := []string{"$ " + command}
-		logs = append(logs, commandLogs[0])
-
-		commandCtx, cancelCommand := context.WithCancel(taskCtx)
-		// Execution tasks are claimed from the authenticated control plane. Do not
-		// feed user-provided fragments into this shell command path without first
-		// converting them to argv-style commands or a strict template allowlist.
-		r.logger.Info("execution task command started",
-			zap.String("task_id", task.ID),
-			zap.String("task_kind", task.TaskKind),
-			zap.String("provider_kind", task.ProviderKind),
-			zap.String("agent_id", agentID),
-			zap.String("command_source", "control_plane_claim"),
-			zap.String("command_fingerprint", commandFingerprint(command)),
-			zap.Int("command_index", index+1),
-			zap.Int("command_count", commandCount),
-			zap.String("workspace_path", workspacePath),
-		)
-		cmd := exec.CommandContext(commandCtx, "/bin/sh", "-lc", command)
-		configureCommandCancellation(cmd)
-		if environment := secretEnvironment(commandCtx); environment != nil {
-			cmd.Env = environment
-		}
-		if commandDir != "" {
-			cmd.Dir = commandDir
-		}
-		var stdout bytes.Buffer
-		var stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
-		done := make(chan struct{})
-		stopReason := make(chan string, 1)
-		go r.streamHeartbeats(commandCtx, cancelCommand, done, stopReason, task, agentID, command, index+1, commandCount, workspacePath)
-		go r.watchRunnerStatus(commandCtx, cancelCommand, done, stopReason, task)
-		err := cmd.Run()
-		close(done)
-		cancelCommand()
-		remoteStatus := drainStopReason(stopReason)
-
-		if value := strings.TrimSpace(stdout.String()); value != "" {
-			commandLogs = append(commandLogs, value)
-			logs = append(logs, value)
-		}
-		if value := strings.TrimSpace(stderr.String()); value != "" {
-			commandLogs = append(commandLogs, value)
-			logs = append(logs, value)
-		}
-		remoteTask, ok = r.callback(taskCtx, task, "running", extendMap(
-			buildHeartbeatPayload(agentID, command, index+1, commandCount),
-			map[string]any{
-				"logs":          commandLogs,
-				"workspacePath": workspacePath,
-				"pipelineStage": pipelineStage,
-			},
-		))
-		if ok && shouldStopLocalExecution(remoteTask.Status) {
-			return
-		}
-		if remoteStatus != "" {
-			stopSource, stopReason := r.stopInfo(task.ID)
-			if stopSource == "local_api" {
-				r.updateActiveTask(task.ID, func(item *ActiveTask) {
-					item.Status = "canceled"
-					item.StopSource = stopSource
-					item.StopReason = stopReason
-				})
-				r.finalCallback(ctx, task, "canceled", map[string]any{
-					"agentId":       agentID,
-					"workspacePath": workspacePath,
-					"canceledAt":    time.Now().UTC().Format(time.RFC3339),
-					"cancelReason":  stopReason,
-				})
-				r.metrics.markOutcome(metricScopeExecution, "canceled")
-			}
-			return
-		}
-		if errors.Is(taskCtx.Err(), context.Canceled) {
-			stopSource, stopReason := r.stopInfo(task.ID)
-			if stopSource == "local_api" {
-				r.updateActiveTask(task.ID, func(item *ActiveTask) {
-					item.Status = "canceled"
-					item.StopSource = stopSource
-					item.StopReason = stopReason
-				})
-				r.finalCallback(ctx, task, "canceled", map[string]any{
-					"agentId":       agentID,
-					"workspacePath": workspacePath,
-					"canceledAt":    time.Now().UTC().Format(time.RFC3339),
-					"cancelReason":  stopReason,
-				})
-				r.metrics.markOutcome(metricScopeExecution, "canceled")
-				return
-			}
-		}
-		if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
-			timeout := r.executionTaskTimeout(task)
-			timeoutSeconds := ceilDurationSeconds(timeout)
-			message := fmt.Sprintf("execution task timed out after %s", timeout)
-			r.updateActiveTask(task.ID, func(item *ActiveTask) {
-				item.Status = "callback_timeout"
-				item.StopReason = message
-			})
-			r.finalCallback(ctx, task, "callback_timeout", map[string]any{
-				"logs":           []string{message},
-				"error":          message,
-				"agentId":        agentID,
-				"currentCommand": command,
-				"workspacePath":  workspacePath,
-				"timeoutSeconds": timeoutSeconds,
-				"timeout":        timeout.String(),
-			})
-			r.metrics.markOutcome(metricScopeExecution, "callback_timeout")
-			return
-		}
-		if err != nil {
-			if errors.Is(err, context.Canceled) && remoteStatus != "" {
-				return
-			}
-			r.updateActiveTask(task.ID, func(item *ActiveTask) {
-				item.Status = "failed"
-				item.StopReason = err.Error()
-			})
-			r.finalCallback(ctx, task, "failed", map[string]any{
-				"logs":           []string{fmt.Sprintf("command failed: %v", err)},
-				"error":          err.Error(),
-				"agentId":        agentID,
-				"currentCommand": command,
-				"failureStage":   pipelineStage,
-				"workspacePath":  workspacePath,
-			})
-			r.metrics.markOutcome(metricScopeExecution, "failed")
+		if !r.executeTaskCommand(ctx, taskCtx, task, command, commandDir, workspacePath, index, commandCount) {
 			return
 		}
 	}
@@ -840,6 +724,158 @@ func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
 	})
 	r.finalCallback(ctx, task, "completed", payload)
 	r.metrics.markOutcome(metricScopeExecution, "completed")
+}
+
+func (r *Runner) executeTaskCommand(ctx, taskCtx context.Context, task ExecutionTask, command, commandDir, workspacePath string, index, commandCount int) bool {
+	agentID := firstNonEmpty(strings.TrimSpace(r.cfg.AgentID), "local-agent")
+	pipelineStage := commandPipelineStage(command)
+	r.updateActiveTask(task.ID, func(item *ActiveTask) {
+		item.Status = "running"
+		item.CurrentCommand = command
+		item.CommandIndex = index + 1
+		item.CommandCount = commandCount
+		item.WorkspacePath = workspacePath
+	})
+	remoteTask, ok := r.callback(taskCtx, task, "running", extendMap(
+		buildHeartbeatPayload(agentID, command, index+1, commandCount),
+		map[string]any{"workspacePath": workspacePath, "pipelineStage": pipelineStage},
+	))
+	if ok && shouldStopLocalExecution(remoteTask.Status) {
+		return false
+	}
+	commandLogs := []string{"$ " + command}
+
+	commandCtx, cancelCommand := context.WithCancel(taskCtx)
+	// Execution tasks are claimed from the authenticated control plane. Do not
+	// feed user-provided fragments into this shell command path without first
+	// converting them to argv-style commands or a strict template allowlist.
+	r.logger.Info("execution task command started",
+		zap.String("task_id", task.ID),
+		zap.String("task_kind", task.TaskKind),
+		zap.String("provider_kind", task.ProviderKind),
+		zap.String("agent_id", agentID),
+		zap.String("command_source", "control_plane_claim"),
+		zap.String("command_fingerprint", commandFingerprint(command)),
+		zap.Int("command_index", index+1),
+		zap.Int("command_count", commandCount),
+		zap.String("workspace_path", workspacePath),
+	)
+	cmd := exec.CommandContext(commandCtx, "/bin/sh", "-lc", command)
+	configureCommandCancellation(cmd)
+	if environment := secretEnvironment(commandCtx); environment != nil {
+		cmd.Env = environment
+	}
+	if commandDir != "" {
+		cmd.Dir = commandDir
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	done := make(chan struct{})
+	stopReason := make(chan string, 1)
+	go r.streamHeartbeats(commandCtx, cancelCommand, done, stopReason, task, agentID, command, index+1, commandCount, workspacePath)
+	go r.watchRunnerStatus(commandCtx, cancelCommand, done, stopReason, task)
+	err := cmd.Run()
+	close(done)
+	cancelCommand()
+	remoteStatus := drainStopReason(stopReason)
+
+	if value := strings.TrimSpace(stdout.String()); value != "" {
+		commandLogs = append(commandLogs, value)
+	}
+	if value := strings.TrimSpace(stderr.String()); value != "" {
+		commandLogs = append(commandLogs, value)
+	}
+	remoteTask, ok = r.callback(taskCtx, task, "running", extendMap(
+		buildHeartbeatPayload(agentID, command, index+1, commandCount),
+		map[string]any{
+			"logs":          commandLogs,
+			"workspacePath": workspacePath,
+			"pipelineStage": pipelineStage,
+		},
+	))
+	if ok && shouldStopLocalExecution(remoteTask.Status) {
+		return false
+	}
+	if remoteStatus != "" {
+		stopSource, stopReason := r.stopInfo(task.ID)
+		if stopSource == "local_api" {
+			r.updateActiveTask(task.ID, func(item *ActiveTask) {
+				item.Status = "canceled"
+				item.StopSource = stopSource
+				item.StopReason = stopReason
+			})
+			r.finalCallback(ctx, task, "canceled", map[string]any{
+				"agentId":       agentID,
+				"workspacePath": workspacePath,
+				"canceledAt":    time.Now().UTC().Format(time.RFC3339),
+				"cancelReason":  stopReason,
+			})
+			r.metrics.markOutcome(metricScopeExecution, "canceled")
+		}
+		return false
+	}
+	if errors.Is(taskCtx.Err(), context.Canceled) {
+		stopSource, stopReason := r.stopInfo(task.ID)
+		if stopSource == "local_api" {
+			r.updateActiveTask(task.ID, func(item *ActiveTask) {
+				item.Status = "canceled"
+				item.StopSource = stopSource
+				item.StopReason = stopReason
+			})
+			r.finalCallback(ctx, task, "canceled", map[string]any{
+				"agentId":       agentID,
+				"workspacePath": workspacePath,
+				"canceledAt":    time.Now().UTC().Format(time.RFC3339),
+				"cancelReason":  stopReason,
+			})
+			r.metrics.markOutcome(metricScopeExecution, "canceled")
+			return false
+		}
+	}
+	if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+		timeout := r.executionTaskTimeout(task)
+		timeoutSeconds := ceilDurationSeconds(timeout)
+		message := fmt.Sprintf("execution task timed out after %s", timeout)
+		r.updateActiveTask(task.ID, func(item *ActiveTask) {
+			item.Status = "callback_timeout"
+			item.StopReason = message
+		})
+		r.finalCallback(ctx, task, "callback_timeout", map[string]any{
+			"logs":           []string{message},
+			"error":          message,
+			"agentId":        agentID,
+			"currentCommand": command,
+			"workspacePath":  workspacePath,
+			"timeoutSeconds": timeoutSeconds,
+			"timeout":        timeout.String(),
+		})
+		r.metrics.markOutcome(metricScopeExecution, "callback_timeout")
+		return false
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) && remoteStatus != "" {
+			return false
+		}
+		r.updateActiveTask(task.ID, func(item *ActiveTask) {
+			item.Status = "failed"
+			item.StopReason = err.Error()
+		})
+		r.finalCallback(ctx, task, "failed", map[string]any{
+			"logs":           []string{fmt.Sprintf("command failed: %v", err)},
+			"error":          err.Error(),
+			"agentId":        agentID,
+			"currentCommand": command,
+			"failureStage":   pipelineStage,
+			"workspacePath":  workspacePath,
+		})
+		r.metrics.markOutcome(metricScopeExecution, "failed")
+		return false
+	}
+
+	return true
 }
 
 func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOperation) {
@@ -872,9 +908,16 @@ func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOpe
 	taskCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 	logs := []string{fmt.Sprintf("docker operation %s started: %s", operation.ID, operation.OperationKind)}
-	if remote, ok := r.dockerCallback(taskCtx, operation, "running", dockerRuntimePayload(taskCtx, r.cfg, map[string]any{
+	remote, ok := r.dockerCallback(taskCtx, operation, "running", dockerRuntimePayload(taskCtx, r.cfg, map[string]any{
 		"heartbeatAt": time.Now().UTC().Format(time.RFC3339),
-	}), logs); ok && shouldStopLocalExecution(remote.Status) {
+	}), logs)
+	if !ok || remote.ID != operation.ID || remote.Status != "running" && !shouldStopDockerExecution(remote.Status) {
+		r.logger.Warn("Docker execution start was not confirmed by control plane", zap.String("operation_id", operation.ID))
+		r.metrics.markOutcome(metricScopeDocker, "denied")
+		return
+	}
+	if shouldStopDockerExecution(remote.Status) {
+		r.acknowledgeDockerCancellation(ctx, operation, remote.Status)
 		r.metrics.markOutcome(metricScopeDocker, strings.TrimSpace(remote.Status))
 		return
 	}
@@ -901,6 +944,8 @@ func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOpe
 	}
 	close(done)
 	if remoteStatus := drainStopReason(stopReason); remoteStatus != "" {
+		r.acknowledgeDockerCancellation(ctx, operation, remoteStatus)
+		r.metrics.markOutcome(metricScopeDocker, remoteStatus)
 		return
 	}
 	logs = append(logs, commandLogs...)
@@ -920,7 +965,13 @@ func (r *Runner) executeDockerOperation(ctx context.Context, operation DockerOpe
 	payload := dockerRuntimePayload(ctx, r.cfg, map[string]any{
 		"completedAt": time.Now().UTC().Format(time.RFC3339),
 	})
-	if operation.ProjectID != "" {
+	if operation.Payload["action"] == "validate" {
+		payload["validatedRenderedDigest"] = operation.Payload["renderedDigest"]
+	}
+	if operation.Payload["action"] == "delivery_deploy" {
+		payload["appliedRenderedDigest"] = operation.Payload["renderedDigest"]
+	}
+	if operation.ProjectID != "" && operation.Payload["action"] != "validate" {
 		services, serviceErr := r.collectComposeServices(ctx, operation)
 		if serviceErr == nil && len(services) > 0 {
 			payload["services"] = services
@@ -958,7 +1009,7 @@ func (r *Runner) streamDockerHeartbeats(ctx context.Context, cancel context.Canc
 		case <-ticker.C:
 			if remoteOperation, ok := r.dockerCallback(ctx, operation, "running", dockerRuntimePayload(ctx, r.cfg, map[string]any{
 				"heartbeatAt": time.Now().UTC().Format(time.RFC3339),
-			}), nil); ok && shouldStopLocalExecution(remoteOperation.Status) {
+			}), nil); ok && shouldStopDockerExecution(remoteOperation.Status) {
 				select {
 				case stopReason <- strings.TrimSpace(remoteOperation.Status):
 				default:
@@ -966,7 +1017,7 @@ func (r *Runner) streamDockerHeartbeats(ctx context.Context, cancel context.Canc
 				cancel()
 				return
 			}
-			if remoteOperation, ok := r.fetchDockerRunnerStatus(ctx, operation.ID); ok && shouldStopLocalExecution(remoteOperation.Status) {
+			if remoteOperation, ok := r.fetchDockerRunnerStatus(ctx, operation.ID); ok && shouldStopDockerExecution(remoteOperation.Status) {
 				select {
 				case stopReason <- strings.TrimSpace(remoteOperation.Status):
 				default:
@@ -996,6 +1047,7 @@ func (r *Runner) executeAgentRun(ctx context.Context, run AgentRun) {
 		"heartbeatAt": startedAt.Format(time.RFC3339),
 		"providerId":  run.ProviderID,
 	}, nil, nil, "", ""); ok && shouldStopLocalExecution(remoteRun.Status) {
+		r.acknowledgeAgentCancellation(ctx, run, remoteRun.Status)
 		return
 	}
 
@@ -1015,6 +1067,11 @@ func (r *Runner) executeAgentRun(ctx context.Context, run AgentRun) {
 	close(done)
 	remoteStatus := drainStopReason(stopReason)
 	if remoteStatus != "" {
+		r.acknowledgeAgentCancellation(ctx, run, remoteStatus)
+		return
+	}
+	if run.CapabilityID == "general" {
+		r.finishAgentChatRun(ctx, taskCtx, run, output, err)
 		return
 	}
 	if err != nil {
@@ -1099,6 +1156,9 @@ type agentProviderExecutor func(context.Context, AgentRun) (map[string]any, []st
 type agentProviderCommandSpec = AgentProviderCommandSpec
 
 func (r *Runner) resolveAgentProviderExecutor(run AgentRun) agentProviderExecutor {
+	if run.CapabilityID == "general" {
+		return r.executeChatProviderRun
+	}
 	providerKey := normalizedAgentProviderKey(run)
 	var executor agentProviderExecutor
 	switch providerKey {
@@ -1225,6 +1285,9 @@ func (r *Runner) prefetchAgentRunToolContext(ctx context.Context, run AgentRun) 
 
 func (r *Runner) executeComposeAction(ctx context.Context, operation DockerOperation) ([]string, error) {
 	action := firstNonEmpty(strings.TrimSpace(fmt.Sprint(operation.Payload["action"])), "deploy")
+	if action == "validate" {
+		return r.validateDeliveryCompose(ctx, operation)
+	}
 	dir, logs, err := r.prepareComposeWorkspace(operation)
 	if err != nil {
 		return logs, err
@@ -1360,6 +1423,10 @@ func (r *Runner) prepareComposeWorkspace(operation DockerOperation) (string, []s
 func composeArgsForAction(action string) []string {
 	base := []string{"compose", "-f", "compose.yaml"}
 	switch strings.TrimSpace(action) {
+	case "validate":
+		return append(base, "config", "--quiet")
+	case "delivery_deploy":
+		return append(base, "up", "-d", "--no-build", "--pull", "always", "--wait")
 	case "", "deploy", "redeploy", "start":
 		return append(base, "up", "-d")
 	case "restart":
@@ -1458,7 +1525,7 @@ func (r *Runner) watchRunnerStatus(ctx context.Context, cancel context.CancelFun
 			return
 		case <-ticker.C:
 			remoteTask, ok := r.fetchRunnerTaskStatus(ctx, task.ID)
-			if ok && shouldStopLocalExecution(remoteTask.Status) {
+			if ok && (shouldStopLocalExecution(remoteTask.Status) || strings.HasPrefix(task.ProviderKind, "buildpacks_runner.") && remoteTask.Status == "canceling") {
 				r.updateActiveTask(task.ID, func(item *ActiveTask) {
 					item.Status = remoteTask.Status
 					item.StopSource = "control_plane"
@@ -1548,12 +1615,13 @@ func (r *Runner) dockerCallback(ctx context.Context, operation DockerOperation, 
 	var result DockerOperation
 	ok := r.withCallbackRetry(ctx, metricScopeDocker, status, func() error {
 		next, err := r.apiClient().RecordDockerOperationCallback(ctx, dockerCallbackRequest{
-			OperationID:   operation.ID,
-			WorkerID:      dockerWorkerID(r.cfg),
-			CallbackToken: operation.CallbackToken,
-			Status:        status,
-			Payload:       redactedPayload,
-			Logs:          redactAgentRuntimeLogs(logs),
+			OperationID:              operation.ID,
+			CancellationAcknowledged: status == "canceled" && boolValue(payload["cancellationAcknowledged"], false),
+			WorkerID:                 dockerWorkerID(r.cfg),
+			CallbackToken:            operation.CallbackToken,
+			Status:                   status,
+			Payload:                  redactedPayload,
+			Logs:                     redactAgentRuntimeLogs(logs),
 		})
 		if err != nil {
 			return err
@@ -1600,6 +1668,9 @@ func (r *Runner) agentRunCallback(ctx context.Context, run AgentRun, status stri
 	}
 	if strings.TrimSpace(result.ID) == "" {
 		return AgentRun{}, false
+	}
+	if shouldStopLocalExecution(status) && payload["cancellationAcknowledged"] != true && result.Status == "canceled" && result.Output["cancellationPending"] == true {
+		r.acknowledgeAgentCancellation(ctx, run, result.Status)
 	}
 	return result, true
 }
@@ -1689,6 +1760,9 @@ func (r *Runner) executionTaskContext(ctx context.Context, task ExecutionTask) (
 }
 
 func (r *Runner) executionTaskTimeout(task ExecutionTask) time.Duration {
+	if task.TimeoutSeconds > 0 {
+		return time.Duration(task.TimeoutSeconds) * time.Second
+	}
 	timeout := durationFromPayload(task.Payload, "timeoutSeconds", "timeout_seconds")
 	if timeout <= 0 {
 		timeout = durationFromPayload(task.Payload, "timeout", "timeoutDuration")
@@ -2899,4 +2973,17 @@ func (r *Runner) stopInfo(taskID string) (string, string) {
 		return "", ""
 	}
 	return item.snapshot.StopSource, item.snapshot.StopReason
+}
+
+func shouldStopDockerExecution(status string) bool {
+	return strings.TrimSpace(status) == "canceling" || shouldStopLocalExecution(status)
+}
+
+func (r *Runner) acknowledgeDockerCancellation(ctx context.Context, operation DockerOperation, status string) {
+	if status != "canceling" && status != "canceled" {
+		return
+	}
+	finalCtx, cancel := r.finalCallbackContext(ctx)
+	defer cancel()
+	r.dockerCallback(finalCtx, operation, "canceled", map[string]any{"cancellationAcknowledged": true}, []string{"runner commands stopped; applied runtime changes are retained"})
 }

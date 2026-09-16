@@ -9,12 +9,14 @@ import (
 	"strings"
 	"time"
 
+	contractresource "github.com/opensoha/soha-contracts/resource"
+	resourceruntime "github.com/opensoha/soha-contracts/resource/runtime"
+
 	sohaapi "github.com/opensoha/soha-contracts/gen/go/sohaapi"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/restmapper"
 )
@@ -22,6 +24,9 @@ import (
 const manifestTaskTimeout = 30 * time.Second
 
 func (c *Client) ExecuteManifestTask(ctx context.Context, payload sohaapi.ManifestExecutionTaskPayload) (sohaapi.ManifestExecutionTaskResult, error) {
+	if len(payload.Documents) == 0 {
+		return sohaapi.ManifestExecutionTaskResult{}, fmt.Errorf("manifest task requires rendered documents")
+	}
 	if c == nil || c.dynamic == nil || c.discovery == nil {
 		return sohaapi.ManifestExecutionTaskResult{}, fmt.Errorf("manifest Kubernetes runtime is unavailable")
 	}
@@ -30,6 +35,9 @@ func (c *Client) ExecuteManifestTask(ctx context.Context, payload sohaapi.Manife
 		return sohaapi.ManifestExecutionTaskResult{}, fmt.Errorf("discover Kubernetes resources: %w", err)
 	}
 	mapper := restmapper.NewDiscoveryRESTMapper(resources)
+	if resourceruntime.IsRolloutTask(payload) {
+		return resourceruntime.ExecuteRolloutTask(ctx, c.dynamic, payload)
+	}
 	switch string(payload.Action) {
 	case "preflight":
 		return c.preflightManifest(ctx, mapper, payload)
@@ -47,6 +55,9 @@ type manifestRESTMapper interface {
 }
 
 func (c *Client) preflightManifest(ctx context.Context, mapper manifestRESTMapper, payload sohaapi.ManifestExecutionTaskPayload) (sohaapi.ManifestExecutionTaskResult, error) {
+	if isGitOpsManifestTask(payload) {
+		return c.executeGitOpsManifest(ctx, mapper, payload)
+	}
 	diagnostics := make([]sohaapi.ManifestDiagnostic, 0)
 	for _, document := range payload.Documents {
 		if _, _, err := c.patchManifestDocument(ctx, mapper, payload, document, true); err != nil {
@@ -63,6 +74,9 @@ func (c *Client) preflightManifest(ctx context.Context, mapper manifestRESTMappe
 }
 
 func (c *Client) applyManifest(ctx context.Context, mapper manifestRESTMapper, payload sohaapi.ManifestExecutionTaskPayload) (sohaapi.ManifestExecutionTaskResult, error) {
+	if isGitOpsManifestTask(payload) {
+		return c.executeGitOpsManifest(ctx, mapper, payload)
+	}
 	diagnostics := make([]sohaapi.ManifestDiagnostic, 0)
 	inventory := make([]sohaapi.ManifestResourceInventory, 0, len(payload.Documents))
 	for _, document := range payload.Documents {
@@ -96,6 +110,9 @@ type manifestDriftResource struct {
 }
 
 func (c *Client) observeManifest(ctx context.Context, mapper manifestRESTMapper, payload sohaapi.ManifestExecutionTaskPayload) (sohaapi.ManifestExecutionTaskResult, error) {
+	if isGitOpsManifestTask(payload) {
+		return c.executeGitOpsManifest(ctx, mapper, payload)
+	}
 	diagnostics := make([]sohaapi.ManifestDiagnostic, 0)
 	inventory := make([]sohaapi.ManifestResourceInventory, 0, len(payload.Documents))
 	driftResources := make([]manifestDriftResource, 0)
@@ -113,7 +130,12 @@ func (c *Client) observeManifest(ctx context.Context, mapper manifestRESTMapper,
 			diagnostics = append(diagnostics, manifestDiagnostic("observe", document, getErr))
 			continue
 		}
-		inventory = append(inventory, manifestInventory(payload, document, desired, live))
+		item := manifestInventory(payload, document, desired, live)
+		item.Health, getErr = resourceruntime.ManifestHealth(ctx, c.dynamic, live)
+		if getErr != nil {
+			diagnostics = append(diagnostics, manifestDiagnostic("observe", document, getErr))
+		}
+		inventory = append(inventory, item)
 		fields := diffManifestFields(desired.Object, live.Object, "")
 		if len(fields) > 0 {
 			driftResources = append(driftResources, manifestDriftResource{APIVersion: document.APIVersion, Kind: document.Kind, Namespace: document.Namespace, Name: document.Name, Fields: fields})
@@ -140,10 +162,6 @@ func (c *Client) patchManifestDocument(ctx context.Context, mapper manifestRESTM
 	if err != nil {
 		return nil, nil, err
 	}
-	body, err := json.Marshal(desired.Object)
-	if err != nil {
-		return nil, nil, err
-	}
 	force := payload.ForceConflicts
 	options := metav1.PatchOptions{FieldManager: firstManifestString(payload.FieldManager, "opensoha-delivery/v1"), Force: &force}
 	if dryRun {
@@ -151,7 +169,7 @@ func (c *Client) patchManifestDocument(ctx context.Context, mapper manifestRESTM
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, manifestTaskTimeout)
 	defer cancel()
-	live, err := manifestResource(c.dynamic, mapping, document.Namespace).Patch(queryCtx, document.Name, types.ApplyPatchType, body, options)
+	live, err := resourceruntime.ApplyManifest(queryCtx, manifestResource(c.dynamic, mapping, document.Namespace), desired, options)
 	return live, desired, err
 }
 
@@ -212,12 +230,20 @@ func manifestResource(client dynamic.Interface, mapping *meta.RESTMapping, names
 
 func manifestInventory(payload sohaapi.ManifestExecutionTaskPayload, document sohaapi.ManifestRenderedDocument, desired, live *unstructured.Unstructured) sohaapi.ManifestResourceInventory {
 	observedDigest := digestManifestObject(projectManifestObject(desired.Object, live.Object))
-	return sohaapi.ManifestResourceInventory{
+	item := sohaapi.ManifestResourceInventory{
 		DeploymentID: payload.DeploymentID, Generation: payload.Generation, APIVersion: document.APIVersion,
 		Kind: document.Kind, Namespace: live.GetNamespace(), Name: live.GetName(), UID: string(live.GetUID()),
 		ResourceVersion: live.GetResourceVersion(), DesiredObjectDigest: document.ContentDigest,
 		ObservedObjectDigest: observedDigest, Health: manifestHealth(live), LastObservedAt: time.Now().UTC(),
+		ResourceGeneration: live.GetGeneration(), Finalizers: live.GetFinalizers(),
 	}
+	if generation, found, err := unstructured.NestedInt64(live.Object, "status", "observedGeneration"); err == nil && found && generation >= 0 {
+		item.ObservedResourceGeneration = &generation
+	}
+	if deletingAt := live.GetDeletionTimestamp(); deletingAt != nil {
+		item.DeletingAt = &deletingAt.Time
+	}
+	return item
 }
 
 func projectManifestObject(desired, observed map[string]any) map[string]any {
@@ -289,6 +315,7 @@ func diffManifestFields(desired, observed map[string]any, prefix string) []manif
 			fields = append(fields, diffManifestFields(desiredMap, observedMap, path)...)
 			continue
 		}
+		observedValue = projectManifestValue(desiredValue, observedValue)
 		if !exists || !manifestJSONEqual(desiredValue, observedValue) {
 			fields = append(fields, manifestDriftField{Path: path, DesiredValue: desiredValue, ObservedValue: observedValue, FieldManager: "opensoha-delivery/v1"})
 		}
@@ -320,7 +347,7 @@ func publicManifestKubernetesError(err error) string {
 func digestManifestObject(value any) string {
 	encoded, _ := json.Marshal(value)
 	digest := sha256.Sum256(encoded)
-	return "sha256:" + hex.EncodeToString(digest[:])
+	return hex.EncodeToString(digest[:])
 }
 
 func manifestJSONEqual(left, right any) bool {
@@ -330,37 +357,10 @@ func manifestJSONEqual(left, right any) bool {
 }
 
 func manifestHealth(item *unstructured.Unstructured) string {
-	if item.GetDeletionTimestamp() != nil {
-		return "degraded"
+	if item == nil {
+		return "unknown"
 	}
-	conditions, found, _ := unstructured.NestedSlice(item.Object, "status", "conditions")
-	if !found {
-		if requiresManifestHealthCondition(item.GetKind()) {
-			return "progressing"
-		}
-		return "healthy"
-	}
-	for _, condition := range conditions {
-		value, _ := condition.(map[string]any)
-		status := strings.EqualFold(fmt.Sprint(value["status"]), "true")
-		conditionType := strings.ToLower(fmt.Sprint(value["type"]))
-		if status && (conditionType == "available" || conditionType == "ready" || conditionType == "complete" || conditionType == "established") {
-			return "healthy"
-		}
-		if (status && (conditionType == "failed" || conditionType == "degraded")) || (!status && (conditionType == "ready" || conditionType == "available")) {
-			return "degraded"
-		}
-	}
-	return "progressing"
-}
-
-func requiresManifestHealthCondition(kind string) bool {
-	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "deployment", "statefulset", "daemonset", "job", "pod":
-		return true
-	default:
-		return false
-	}
+	return contractresource.ManifestHealth(item.Object)
 }
 
 func isVolatileManifestMetadata(key string) bool {

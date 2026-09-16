@@ -110,6 +110,26 @@ func TestRuntimeCancelDeniedWhenActionNotAllowlisted(t *testing.T) {
 	}
 }
 
+func TestObservedCustomResourceDeleteRequiresAction(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, allowed := range []bool{false, true} {
+		configuration := cfgpkg.Config{HTTP: cfgpkg.HTTPConfig{BasePath: "/api/v1"}, Auth: cfgpkg.AuthConfig{BearerToken: "agent-token"}}
+		want := http.StatusForbidden
+		if allowed {
+			configuration.Security.AllowedActions = []string{actionPlatformCustomResourcesDelete}
+			want = http.StatusBadRequest
+		}
+		server := New(configuration, zap.NewNop(), &k8sagent.Client{}, nil)
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/platform/extensions/custom-resources/delete-observed", bytes.NewBufferString(`{}`))
+		request.Header.Set("Authorization", "Bearer agent-token")
+		response := httptest.NewRecorder()
+		server.httpServer.Handler.ServeHTTP(response, request)
+		if response.Code != want {
+			t.Fatalf("allowed=%v status=%d, want=%d", allowed, response.Code, want)
+		}
+	}
+}
+
 func TestRuntimeCancelAllowedWhenActionAllowlisted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	core, logs := observer.New(zap.InfoLevel)
@@ -712,4 +732,16 @@ func (f *fakeRuntimeController) GetActiveTask(string) (runnerpkg.ActiveTask, boo
 func (f *fakeRuntimeController) CancelActiveTask(taskID string, reason string) bool {
 	f.cancelCalled = true
 	return taskID == "task-1"
+}
+
+func TestProtectedNativeRouteRejectsArgoBeforeKubernetesWrite(t *testing.T) {
+	server := New(cfgpkg.Config{HTTP: cfgpkg.HTTPConfig{BasePath: "/api/v1"}, Security: cfgpkg.SecurityConfig{AllowedActions: []string{actionPlatformCustomResourcesCreate}}}, nil, &k8sagent.Client{}, nil)
+	body := `{"definition":{"group":"argoproj.io","version":"v1alpha1","resource":"applications","kind":"Application","namespaced":true},"namespace":"test","content":"apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: app\n  namespace: test\n"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/platform/ownership-v1/extensions/custom-resources", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "resource_ownership_conflict") {
+		t.Fatalf("protected write = %d %s", response.Code, response.Body.String())
+	}
 }

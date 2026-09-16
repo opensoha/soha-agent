@@ -56,7 +56,7 @@ func (c *Client) preflightResourceCreate(ctx context.Context, request domainreso
 			ready = false
 			continue
 		}
-		if err := c.createResource(ctx, candidate, true); err != nil {
+		if _, err := c.createResource(ctx, candidate, true); err != nil {
 			failure := publicResourceCreateError(resourceCreateErrorCode(err), "cluster dry-run rejected resource", "")
 			items[index].DryRun = domainresource.KubernetesResourceDryRunDecision{Status: domainresource.KubernetesResourceDryRunStatusFailed, Error: &failure}
 			items[index].Errors = append(items[index].Errors, failure)
@@ -84,13 +84,15 @@ func (c *Client) CreateResources(ctx context.Context, request domainresource.Kub
 
 	succeeded := 0
 	for index, candidate := range candidates {
-		if err := c.createResource(ctx, candidate, false); err != nil {
+		created, err := c.createResource(ctx, candidate, false)
+		if err != nil {
 			failure := publicResourceCreateError(resourceCreateErrorCode(err), "cluster create failed", "")
 			result.Items[index].Status = domainresource.KubernetesResourceCreateResultStatusFailed
 			result.Items[index].Error = &failure
 			break
 		}
 		result.Items[index].Status = domainresource.KubernetesResourceCreateResultStatusSucceeded
+		candidate.ref.UID = string(created.GetUID())
 		result.Items[index].ResourceRef = &candidate.ref
 		succeeded++
 	}
@@ -265,7 +267,7 @@ func decodeSingleResourceDocument(content string) (*unstructured.Unstructured, e
 	return &unstructured.Unstructured{Object: object}, nil
 }
 
-func (c *Client) createResource(ctx context.Context, candidate resourceCreateCandidate, dryRun bool) error {
+func (c *Client) createResource(ctx context.Context, candidate resourceCreateCandidate, dryRun bool) (*unstructured.Unstructured, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, resourceCreateTimeout)
 	defer cancel()
 	var resource dynamic.ResourceInterface
@@ -274,8 +276,11 @@ func (c *Client) createResource(ctx context.Context, candidate resourceCreateCan
 	} else {
 		resource = c.dynamic.Resource(candidate.gvr)
 	}
-	_, err := resource.Create(requestCtx, candidate.item.DeepCopy(), resourceCreateOptions(dryRun))
-	return err
+	created, err := resource.Create(requestCtx, candidate.item.DeepCopy(), resourceCreateOptions(dryRun))
+	if err == nil && created == nil {
+		return nil, errors.New("cluster create returned no resource")
+	}
+	return created, err
 }
 
 func resourceCreateOptions(dryRun bool) metav1.CreateOptions {

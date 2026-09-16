@@ -55,7 +55,9 @@ Apply this reference to production Go changes in `soha-agent`. Repository contra
 
 ## Verification Gate
 
-Run focused tests during development. Before completing any production Go, module, contracts, security, concurrency, runner, image, or release change, run:
+Use the [skill's Testing section](../SKILL.md#testing) to select checks by impact. Ordinary production Go fixes need the affected package's behavioral regression checks; they do not automatically require the full gate below. Documentation-only changes need content and link checks.
+
+Before completing architecture, module/dependency, public-contract, security, concurrency/runner, image/packaging, or release changes, run the applicable full gate below and the affected artifact checks. CI requirements remain unchanged. Reuse successful results while the relevant code and environment are unchanged; expand or repeat checks only for new changes, failures, or a concrete unresolved risk.
 
 ```bash
 GOWORK=off go mod tidy

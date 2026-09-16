@@ -11,6 +11,15 @@ spec:
   headers:
     customRequestHeaders:
       X-Soha-Outpost-Token: REPLACE_FROM_SECRET_MANAGER
+      X-Soha-Session-Token: ""
+      X-Soha-User: ""
+      X-Soha-User-ID: ""
+      X-Soha-Email: ""
+      X-Soha-Roles: ""
+      X-Soha-Teams: ""
+      X-Soha-Groups: ""
+      X-Soha-Projects: ""
+      X-Soha-Tags: ""
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -18,14 +27,16 @@ metadata:
   name: soha-outpost-auth
 spec:
   forwardAuth:
+    trustForwardHeader: false
     address: http://soha-outpost.soha-outpost.svc.cluster.local/api/v1/outpost/forward-auth
     authRequestHeaders:
       - Cookie
       - X-Forwarded-Host
+      - X-Forwarded-Proto
+      - X-Forwarded-For
       - X-Forwarded-Method
       - X-Forwarded-Uri
       - X-Soha-Outpost-Token
-      - X-Soha-Session-Token
     authResponseHeaders:
       - X-Soha-User
       - X-Soha-User-ID
@@ -44,6 +55,7 @@ spec:
   headers:
     customRequestHeaders:
       X-Soha-Outpost-Token: ""
+      X-Soha-Session-Token: ""
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
