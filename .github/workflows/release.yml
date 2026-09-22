@@ -7,13 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, for example v0.1.6"
+        description: "Release version, for example v0.1.7"
         required: true
-        default: "v0.1.6"
+        default: "v0.1.7"
       contracts_ref:
-        description: "soha-contracts tag or commit to use for image builds"
-        required: true
-        default: "v0.1.15"
+        description: "Optional assertion of the contracts version pinned in go.mod"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -57,13 +57,6 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: soha-agent
-      - name: Checkout contracts
-        uses: actions/checkout@v7
-        with:
-          repository: opensoha/soha-contracts
-          ref: ${{ inputs.contracts_ref || 'v0.1.15' }}
-          path: soha-contracts
-          token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.6"
@@ -105,11 +98,25 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: soha-agent
+      - name: Resolve pinned contracts version
+        id: contracts
+        working-directory: soha-agent
+        env:
+          REQUESTED_CONTRACTS_REF: ${{ inputs.contracts_ref }}
+        run: |
+          set -euo pipefail
+          contracts_ref="$(awk '$1 == "github.com/opensoha/soha-contracts" {print $2}' go.mod)"
+          [[ "${contracts_ref}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [ -n "${REQUESTED_CONTRACTS_REF}" ] && [ "${REQUESTED_CONTRACTS_REF}" != "${contracts_ref}" ]; then
+            echo "contracts input differs from the reviewed go.mod dependency" >&2
+            exit 1
+          fi
+          echo "ref=${contracts_ref}" >> "$GITHUB_OUTPUT"
       - name: Checkout contracts
         uses: actions/checkout@v7
         with:
           repository: opensoha/soha-contracts
-          ref: ${{ inputs.contracts_ref || 'v0.1.15' }}
+          ref: ${{ steps.contracts.outputs.ref }}
           path: soha-contracts
           token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: docker/setup-qemu-action@v3
