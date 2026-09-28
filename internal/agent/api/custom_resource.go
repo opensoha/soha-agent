@@ -8,6 +8,7 @@ import (
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
 	apiresponse "github.com/opensoha/soha-agent/internal/api/response"
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
+	contractresource "github.com/opensoha/soha-contracts/resource"
 )
 
 type customResourceListRequest struct {
@@ -18,6 +19,27 @@ type customResourceListRequest struct {
 type customResourceYAMLRequest = domainresource.CustomResourceYAMLRequest
 
 func registerCustomResourceRoutes(platform *gin.RouterGroup, client *k8sagent.Client, actions actionPolicy) {
+	platform.POST("/extensions/custom-resources/access", func(c *gin.Context) {
+		var req contractresource.CustomResourceAccessRequest
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32<<10)
+		if err := c.ShouldBindJSON(&req); err != nil || invalidCRDDefinition(req.Definition) {
+			apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "valid custom resource definition is required")
+			return
+		}
+		allowed, err := client.CustomResourceActions(c.Request.Context(), req.Definition, req.Namespace, req.Name)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		result := contractresource.CustomResourceAccess{AllowedActions: []string{}}
+		for _, action := range allowed {
+			policy := map[string]string{"list": actionPlatformCustomResourcesList, "create": actionPlatformCustomResourcesCreate, "update": actionPlatformCustomResourcesApply, "delete": actionPlatformCustomResourcesDelete}[action]
+			if action == "view" || actions.allows(policy) {
+				result.AllowedActions = append(result.AllowedActions, action)
+			}
+		}
+		apiresponse.Item(c, http.StatusOK, result)
+	})
 	platform.POST("/extensions/custom-resources/list", actions.Require(actionPlatformCustomResourcesList), func(c *gin.Context) {
 		var req customResourceListRequest
 		if err := c.ShouldBindJSON(&req); err != nil || invalidCRDDefinition(req.Definition) {

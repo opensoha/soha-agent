@@ -16,6 +16,7 @@ import (
 const knownPublicProjectToken = "soha-1234567890123456789012345678901234567890"
 
 type Config struct {
+	Prometheus   PrometheusConfig   `mapstructure:"prometheus"`
 	App          AppConfig          `mapstructure:"app"`
 	HTTP         HTTPConfig         `mapstructure:"http"`
 	Logger       LoggerConfig       `mapstructure:"logger"`
@@ -133,6 +134,11 @@ type AgentProviderConfig struct {
 	PromptArg        string   `mapstructure:"prompt_arg"`
 	SkillArg         string   `mapstructure:"skill_arg"`
 	ProviderSkillArg string   `mapstructure:"provider_skill_arg"`
+}
+
+type PrometheusConfig struct {
+	BaseURL     string `mapstructure:"base_url"`
+	BearerToken string `mapstructure:"bearer_token"`
 }
 
 type KubernetesConfig struct {
@@ -304,6 +310,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.bearer_token_file", "")
 	v.SetDefault("security.allowed_actions", []string{})
 	v.SetDefault("audit.file_path", "")
+	v.SetDefault("prometheus.base_url", "")
+	v.SetDefault("prometheus.bearer_token", "")
 	v.SetDefault("control_plane.enabled", false)
 	v.SetDefault("control_plane.base_url", "http://127.0.0.1:8080")
 	v.SetDefault("control_plane.bearer_token", "")
@@ -446,7 +454,7 @@ func validateProductionAllowedActions(actions []string, allowedOrigins []string)
 
 func knownAction(action string) bool {
 	switch normalizeActionName(action) {
-	case "platform.pods.exec",
+	case "platform.nodes.drain", "platform.pods.exec",
 		"platform.deployments.restart",
 		"platform.deployments.scale",
 		"platform.deployments.image",

@@ -23,6 +23,7 @@ auth:
 
 security:
   allowed_actions:
+    - platform.nodes.drain
     - platform.pods.exec
     - platform.deployments.restart
     - platform.deployments.scale
@@ -47,6 +48,10 @@ security:
     - platform.helm_releases.rollback
     - runtime.execution_tasks.cancel
     - docker.runtime.terminal
+
+prometheus:
+  base_url: ""
+  bearer_token: ""
 
 audit:
   file_path: ./.soha/audit/actions.jsonl
