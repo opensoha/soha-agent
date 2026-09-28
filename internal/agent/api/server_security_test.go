@@ -745,3 +745,25 @@ func TestProtectedNativeRouteRejectsArgoBeforeKubernetesWrite(t *testing.T) {
 		t.Fatalf("protected write = %d %s", response.Code, response.Body.String())
 	}
 }
+
+func TestBasicResourceMutationRoutesDenyMissingActions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := New(cfgpkg.Config{HTTP: cfgpkg.HTTPConfig{BasePath: "/api/v1"}, Auth: cfgpkg.AuthConfig{BearerToken: "test-token"}}, zap.NewNop(), &k8sagent.Client{}, nil)
+	for _, route := range []struct{ method, path string }{
+		{"PUT", "/configuration/configmaps/demo/data?namespace=team"}, {"PUT", "/configuration/secrets/demo/data?namespace=team"},
+		{"POST", "/namespaces"}, {"PUT", "/namespaces/team"}, {"DELETE", "/namespaces/team"},
+		{"PUT", "/infrastructure/nodes/node"}, {"PUT", "/infrastructure/nodes/node/schedulability"}, {"POST", "/infrastructure/nodes/node/drain"},
+		{"POST", "/workloads/cronjobs/job/suspend?namespace=team"},
+	} {
+		t.Run(route.method+route.path, func(t *testing.T) {
+			req := httptest.NewRequest(route.method, "/api/v1/platform/ownership-v2"+route.path, strings.NewReader(`{}`))
+			req.Header.Set("Authorization", "Bearer test-token")
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			server.httpServer.Handler.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}

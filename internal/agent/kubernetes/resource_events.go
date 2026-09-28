@@ -22,6 +22,7 @@ type agentEventInformer struct {
 	kind       string
 	namespaced bool
 	informer   cache.SharedIndexInformer
+	healthy    *atomic.Bool
 }
 
 type agentResourceSubscription struct {
@@ -40,35 +41,57 @@ type resourceEventStream struct {
 	mu          sync.RWMutex
 	startOnce   sync.Once
 	ready       atomic.Bool
+	stopped     atomic.Bool
 }
 
 func newResourceEventStream(clusterID string, client kubernetes.Interface) *resourceEventStream {
 	factory := informers.NewSharedInformerFactoryWithOptions(client, 2*time.Minute)
-	return &resourceEventStream{
+	stream := &resourceEventStream{
 		clusterID: clusterID, factory: factory, subscribers: map[uint64]*agentResourceSubscription{},
 		informers: []agentEventInformer{
-			{"v1", "Namespace", false, factory.Core().V1().Namespaces().Informer()},
-			{"v1", "Node", false, factory.Core().V1().Nodes().Informer()},
-			{"v1", "Pod", true, factory.Core().V1().Pods().Informer()},
-			{"v1", "Service", true, factory.Core().V1().Services().Informer()},
-			{"v1", "Event", true, factory.Core().V1().Events().Informer()},
-			{"apps/v1", "Deployment", true, factory.Apps().V1().Deployments().Informer()},
-			{"apps/v1", "StatefulSet", true, factory.Apps().V1().StatefulSets().Informer()},
-			{"apps/v1", "DaemonSet", true, factory.Apps().V1().DaemonSets().Informer()},
-			{"apps/v1", "ReplicaSet", true, factory.Apps().V1().ReplicaSets().Informer()},
-			{"batch/v1", "Job", true, factory.Batch().V1().Jobs().Informer()},
-			{"batch/v1", "CronJob", true, factory.Batch().V1().CronJobs().Informer()},
-			{"networking.k8s.io/v1", "Ingress", true, factory.Networking().V1().Ingresses().Informer()},
-			{"discovery.k8s.io/v1", "EndpointSlice", true, factory.Discovery().V1().EndpointSlices().Informer()},
-			{"networking.k8s.io/v1", "NetworkPolicy", true, factory.Networking().V1().NetworkPolicies().Informer()},
+			{"v1", "Namespace", false, factory.Core().V1().Namespaces().Informer(), nil},
+			{"v1", "Node", false, factory.Core().V1().Nodes().Informer(), nil},
+			{"v1", "Pod", true, factory.Core().V1().Pods().Informer(), nil},
+			{"v1", "Service", true, factory.Core().V1().Services().Informer(), nil},
+			{"v1", "Event", true, factory.Core().V1().Events().Informer(), nil},
+			{"apps/v1", "Deployment", true, factory.Apps().V1().Deployments().Informer(), nil},
+			{"apps/v1", "StatefulSet", true, factory.Apps().V1().StatefulSets().Informer(), nil},
+			{"apps/v1", "DaemonSet", true, factory.Apps().V1().DaemonSets().Informer(), nil},
+			{"apps/v1", "ReplicaSet", true, factory.Apps().V1().ReplicaSets().Informer(), nil},
+			{"batch/v1", "Job", true, factory.Batch().V1().Jobs().Informer(), nil},
+			{"batch/v1", "CronJob", true, factory.Batch().V1().CronJobs().Informer(), nil},
+			{"networking.k8s.io/v1", "Ingress", true, factory.Networking().V1().Ingresses().Informer(), nil},
+			{"discovery.k8s.io/v1", "EndpointSlice", true, factory.Discovery().V1().EndpointSlices().Informer(), nil},
+			{"networking.k8s.io/v1", "NetworkPolicy", true, factory.Networking().V1().NetworkPolicies().Informer(), nil},
+			{"v1", "ConfigMap", true, factory.Core().V1().ConfigMaps().Informer(), nil},
+			{"v1", "Secret", true, factory.Core().V1().Secrets().Informer(), nil},
 		},
 	}
+	for index := range stream.informers {
+		stream.informers[index].healthy = &atomic.Bool{}
+		stream.informers[index].healthy.Store(true)
+	}
+	return stream
 }
 
 func (s *resourceEventStream) Start(ctx context.Context) {
 	s.startOnce.Do(func() {
 		for _, spec := range s.informers {
 			spec := spec
+			_ = spec.informer.SetTransform(func(obj any) (any, error) {
+				return configurationCacheMetadata(obj), nil
+			})
+			_ = spec.informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
+				// ponytail: after a watch failure, use live reads until restart.
+				// HasSynced stays true during relists; per-object transforms cannot
+				// prove that the replacement batch has reached the store. Rebuild
+				// per-kind informers if automatic cache recovery becomes necessary.
+				spec.healthy.Store(false)
+				s.publish(domainresource.ResourceStreamEvent{Type: "error", ClusterID: s.clusterID, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Source: "agent-informer", CacheStatus: "degraded", Message: "agent informer watch failed", ResyncRequired: true})
+			})
+			if configurationCacheKind(spec.kind) {
+				continue
+			}
 			_, _ = spec.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 				AddFunc: func(obj any) { s.publishObject(spec, "added", obj) },
 				UpdateFunc: func(oldObj, newObj any) {
@@ -81,17 +104,20 @@ func (s *resourceEventStream) Start(ctx context.Context) {
 				},
 				DeleteFunc: func(obj any) { s.publishObject(spec, "deleted", agentDeletedObject(obj)) },
 			})
-			_ = spec.informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
-				s.publish(domainresource.ResourceStreamEvent{Type: "error", ClusterID: s.clusterID, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Source: "agent-informer", CacheStatus: "degraded", Message: "agent informer watch failed", ResyncRequired: true})
-			})
 		}
 		s.factory.Start(ctx.Done())
 		go func() {
 			syncs := make([]cache.InformerSynced, 0, len(s.informers))
 			for _, spec := range s.informers {
+				if configurationCacheKind(spec.kind) {
+					continue
+				}
 				syncs = append(syncs, spec.informer.HasSynced)
 			}
 			s.ready.Store(cache.WaitForCacheSync(ctx.Done(), syncs...))
+			<-ctx.Done()
+			s.stopped.Store(true)
+			s.ready.Store(false)
 		}()
 	})
 }

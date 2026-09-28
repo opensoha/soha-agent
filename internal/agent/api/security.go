@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	actionPlatformNodesDrain              = "platform.nodes.drain"
 	actionPlatformPodsExec                = "platform.pods.exec"
 	actionPlatformDeploymentRestart       = "platform.deployments.restart"
 	actionPlatformDeploymentScale         = "platform.deployments.scale"

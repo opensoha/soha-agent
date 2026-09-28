@@ -43,6 +43,23 @@ control_plane:
 	}
 }
 
+func TestLoadPrometheusEndpointAndSecretFromEnvironment(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "agent.yaml")
+	if err := os.WriteFile(configPath, []byte("app:\n  env: development\nhttp:\n  addr: 127.0.0.1:18080\nprometheus:\n  bearer_token: ''\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SOHA_AGENT_CONFIG_FILE", configPath)
+	t.Setenv("SOHA_AGENT_PROMETHEUS_BASE_URL", "http://prometheus.monitoring:9090")
+	t.Setenv("SOHA_AGENT_PROMETHEUS_BEARER_TOKEN", "test-prometheus-token")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Prometheus.BaseURL != "http://prometheus.monitoring:9090" || cfg.Prometheus.BearerToken != "test-prometheus-token" {
+		t.Fatal("Prometheus environment configuration was not loaded")
+	}
+}
+
 func TestValidateRequiresProductionAgentToken(t *testing.T) {
 	err := Validate(Config{
 		App: AppConfig{Env: "production"},

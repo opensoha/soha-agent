@@ -10,6 +10,8 @@ import (
 	"time"
 
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +25,14 @@ const (
 )
 
 func (c *Client) listConfigMapSummaries(ctx context.Context, namespace string) ([]domainresource.ConfigMapView, error) {
+	if items, cached := cachedResourceItems[corev1.ConfigMap](ctx, c, "ConfigMap", namespace); cached {
+		views := make([]domainresource.ConfigMapView, 0, len(items))
+		for _, item := range items {
+			entries, _ := strconv.Atoi(item.Annotations[cacheEntryCountAnnotation])
+			views = append(views, domainresource.ConfigMapView{Name: item.Name, Namespace: item.Namespace, DataEntries: entries, AgeSeconds: secondsSince(item.CreationTimestamp.Time)})
+		}
+		return views, nil
+	}
 	table, err := c.listCoreTable(ctx, namespace, "configmaps", "")
 	if err != nil {
 		return nil, err
@@ -54,6 +64,14 @@ func (c *Client) listConfigMapSummaries(ctx context.Context, namespace string) (
 }
 
 func (c *Client) listSecretSummaries(ctx context.Context, namespace string) ([]domainresource.SecretView, error) {
+	if items, cached := cachedResourceItems[corev1.Secret](ctx, c, "Secret", namespace); cached {
+		views := make([]domainresource.SecretView, 0, len(items))
+		for _, item := range items {
+			entries, _ := strconv.Atoi(item.Annotations[cacheEntryCountAnnotation])
+			views = append(views, domainresource.SecretView{Name: item.Name, Namespace: item.Namespace, Type: string(item.Type), DataEntries: entries, AgeSeconds: secondsSince(item.CreationTimestamp.Time)})
+		}
+		return views, nil
+	}
 	table, err := c.listCoreTable(ctx, namespace, "secrets", "")
 	if err != nil {
 		return nil, err
@@ -157,6 +175,19 @@ func listTable(ctx context.Context, client rest.Interface, namespace, resource, 
 }
 
 func (c *Client) listDeploymentSummaries(ctx context.Context, namespace string) ([]domainresource.DeploymentView, error) {
+	if items, cached := cachedResourceItems[appsv1.Deployment](ctx, c, "Deployment", namespace); cached {
+		views := make([]domainresource.DeploymentView, 0, len(items))
+		for _, item := range items {
+			desired := int32(1)
+			if item.Spec.Replicas != nil {
+				desired = *item.Spec.Replicas
+			}
+			views = append(views, domainresource.DeploymentView{Name: item.Name, Namespace: item.Namespace, Labels: item.Labels,
+				DesiredReplicas: desired, ReadyReplicas: item.Status.ReadyReplicas, UpdatedReplicas: item.Status.UpdatedReplicas,
+				Available: item.Status.AvailableReplicas, AgeSeconds: secondsSince(item.CreationTimestamp.Time)})
+		}
+		return views, nil
+	}
 	table, err := listTable(ctx, c.typed.AppsV1().RESTClient(), namespace, "deployments", "")
 	if err != nil {
 		return nil, err
@@ -195,6 +226,16 @@ func (c *Client) listDeploymentSummaries(ctx context.Context, namespace string) 
 }
 
 func (c *Client) listDaemonSetSummaries(ctx context.Context, namespace string) ([]domainresource.DaemonSetView, error) {
+	if items, cached := cachedResourceItems[appsv1.DaemonSet](ctx, c, "DaemonSet", namespace); cached {
+		views := make([]domainresource.DaemonSetView, 0, len(items))
+		for _, item := range items {
+			views = append(views, domainresource.DaemonSetView{Name: item.Name, Namespace: item.Namespace,
+				DesiredNumber: item.Status.DesiredNumberScheduled, CurrentNumber: item.Status.CurrentNumberScheduled,
+				ReadyNumber: item.Status.NumberReady, UpdatedNumber: item.Status.UpdatedNumberScheduled,
+				AvailableNumber: item.Status.NumberAvailable, AgeSeconds: secondsSince(item.CreationTimestamp.Time)})
+		}
+		return views, nil
+	}
 	table, err := listTable(ctx, c.typed.AppsV1().RESTClient(), namespace, "daemonsets", "")
 	if err != nil {
 		return nil, err

@@ -34,15 +34,22 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 	}
 	sort.Strings(signatures)
 	routeDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(signatures, "\n"))))
-	if len(signatures) != 248 {
-		t.Fatalf("route count = %d, want 248", len(signatures))
+	if len(signatures) != 265 {
+		t.Fatalf("route count = %d, want 265", len(signatures))
 	}
-	const expectedRouteDigest = "abf68b1e67db932a984a6a1f044c24dd36b30ee3652e684fa1ad44dd44615481"
+	const expectedRouteDigest = "197aa13a2ddc461bd1e4c5f41b15bc8f687f8cc10c564aa4c61ec9963e143845"
 	if routeDigest != expectedRouteDigest {
 		t.Fatalf("route digest = %s, want %s", routeDigest, expectedRouteDigest)
 	}
 
 	expected := []string{
+		http.MethodPost + " /api/v1/platform/extensions/custom-resources/access",
+		http.MethodPost + " /api/v1/platform/metrics/prometheus/query",
+		http.MethodGet + " /api/v1/platform/ownership-v2/configuration/secrets/:name/detail",
+		http.MethodPut + " /api/v1/platform/ownership-v2/configuration/configmaps/:name/data",
+		http.MethodPost + " /api/v1/platform/ownership-v2/namespaces",
+		http.MethodPost + " /api/v1/platform/ownership-v2/infrastructure/nodes/:name/drain",
+		http.MethodPost + " /api/v1/platform/ownership-v2/workloads/cronjobs/:name/suspend",
 		http.MethodPost + " /api/v1/platform/ownership-v1/resources/yaml/preflight",
 		http.MethodPost + " /api/v1/platform/ownership-v2/resources/yaml/preflight",
 		http.MethodPost + " /api/v1/platform/ownership-v2/manifests/rollout/observe",

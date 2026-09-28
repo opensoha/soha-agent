@@ -129,12 +129,16 @@ func (c *Client) Summary(_ context.Context) domaincluster.Summary {
 func (c *Client) ListNamespaces(ctx context.Context) ([]domainresource.NamespaceView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.CoreV1().Namespaces().List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[corev1.Namespace](queryCtx, c, "Namespace", "")
+	if !cached {
+		live, err := c.typed.CoreV1().Namespaces().List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.NamespaceView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.NamespaceView, 0, len(items))
+	for _, item := range items {
 		views = append(views, domainresource.NamespaceView{
 			Name:       item.Name,
 			Status:     string(item.Status.Phase),
@@ -148,15 +152,23 @@ func (c *Client) ListNamespaces(ctx context.Context) ([]domainresource.Namespace
 func (c *Client) ListNodes(ctx context.Context) ([]domainresource.NodeView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.CoreV1().Nodes().List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[corev1.Node](queryCtx, c, "Node", "")
+	if !cached {
+		live, err := c.typed.CoreV1().Nodes().List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	pods, err := c.typed.CoreV1().Pods(metav1.NamespaceAll).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	pods, cached := cachedResourceItems[corev1.Pod](queryCtx, c, "Pod", metav1.NamespaceAll)
+	if !cached {
+		live, err := c.typed.CoreV1().Pods(metav1.NamespaceAll).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		pods = live.Items
 	}
-	return buildNodeViews(items.Items, pods.Items), nil
+	return buildNodeViews(items, pods), nil
 }
 
 func (c *Client) GetNodeDetail(ctx context.Context, name string) (domainresource.NodeDetailView, error) {
@@ -176,12 +188,16 @@ func (c *Client) GetNodeDetail(ctx context.Context, name string) (domainresource
 func (c *Client) ListPods(ctx context.Context, namespace string) ([]domainresource.PodView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.CoreV1().Pods(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[corev1.Pod](queryCtx, c, "Pod", namespace)
+	if !cached {
+		live, err := c.typed.CoreV1().Pods(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.PodView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.PodView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapPod(item))
 	}
 	return views, nil
@@ -433,12 +449,16 @@ func (c *Client) RollbackDeployment(ctx context.Context, namespace, name, revisi
 func (c *Client) ListStatefulSets(ctx context.Context, namespace string) ([]domainresource.StatefulSetView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.AppsV1().StatefulSets(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[appsv1.StatefulSet](queryCtx, c, "StatefulSet", namespace)
+	if !cached {
+		live, err := c.typed.AppsV1().StatefulSets(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.StatefulSetView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.StatefulSetView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapStatefulSet(item))
 	}
 	return views, nil
@@ -517,12 +537,16 @@ func (c *Client) GetDaemonSetYAML(ctx context.Context, namespace, name string) (
 func (c *Client) ListJobs(ctx context.Context, namespace string) ([]domainresource.JobView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.BatchV1().Jobs(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[batchv1.Job](queryCtx, c, "Job", namespace)
+	if !cached {
+		live, err := c.typed.BatchV1().Jobs(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.JobView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.JobView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapJob(item))
 	}
 	return views, nil
@@ -564,12 +588,16 @@ func (c *Client) GetJobYAML(ctx context.Context, namespace, name string) (domain
 func (c *Client) ListCronJobs(ctx context.Context, namespace string) ([]domainresource.CronJobView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.BatchV1().CronJobs(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[batchv1.CronJob](queryCtx, c, "CronJob", namespace)
+	if !cached {
+		live, err := c.typed.BatchV1().CronJobs(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.CronJobView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.CronJobView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapCronJob(item))
 	}
 	return views, nil
@@ -578,12 +606,16 @@ func (c *Client) ListCronJobs(ctx context.Context, namespace string) ([]domainre
 func (c *Client) ListReplicaSets(ctx context.Context, namespace string) ([]domainresource.ReplicaSetView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.AppsV1().ReplicaSets(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[appsv1.ReplicaSet](queryCtx, c, "ReplicaSet", namespace)
+	if !cached {
+		live, err := c.typed.AppsV1().ReplicaSets(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.ReplicaSetView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.ReplicaSetView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapReplicaSet(item))
 	}
 	return views, nil
@@ -1072,12 +1104,16 @@ func (c *Client) GetHelmReleaseManifest(ctx context.Context, namespace, name, re
 func (c *Client) ListServices(ctx context.Context, namespace string) ([]domainresource.ServiceView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.CoreV1().Services(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[corev1.Service](queryCtx, c, "Service", namespace)
+	if !cached {
+		live, err := c.typed.CoreV1().Services(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.ServiceView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.ServiceView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapService(item))
 	}
 	return views, nil
@@ -1115,12 +1151,16 @@ func (c *Client) GetServiceDetail(ctx context.Context, namespace, name string) (
 func (c *Client) ListIngresses(ctx context.Context, namespace string) ([]domainresource.IngressView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.NetworkingV1().Ingresses(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[networkingv1.Ingress](queryCtx, c, "Ingress", namespace)
+	if !cached {
+		live, err := c.typed.NetworkingV1().Ingresses(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.IngressView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.IngressView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapIngress(item))
 	}
 	return views, nil
@@ -1165,12 +1205,16 @@ func (c *Client) GetIngressDetail(ctx context.Context, namespace, name string) (
 func (c *Client) ListEndpointSlices(ctx context.Context, namespace string) ([]domainresource.EndpointSliceView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.DiscoveryV1().EndpointSlices(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[discoveryv1.EndpointSlice](queryCtx, c, "EndpointSlice", namespace)
+	if !cached {
+		live, err := c.typed.DiscoveryV1().EndpointSlices(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.EndpointSliceView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.EndpointSliceView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapEndpointSlice(item))
 	}
 	return views, nil
@@ -1189,12 +1233,16 @@ func (c *Client) GetEndpointSliceDetail(ctx context.Context, namespace, name str
 func (c *Client) ListNetworkPolicies(ctx context.Context, namespace string) ([]domainresource.NetworkPolicyView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.NetworkingV1().NetworkPolicies(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[networkingv1.NetworkPolicy](queryCtx, c, "NetworkPolicy", namespace)
+	if !cached {
+		live, err := c.typed.NetworkingV1().NetworkPolicies(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.NetworkPolicyView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.NetworkPolicyView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapNetworkPolicy(item))
 	}
 	return views, nil
@@ -1481,12 +1529,16 @@ func (c *Client) ListReplicationControllers(ctx context.Context, namespace strin
 func (c *Client) ListClusterEvents(ctx context.Context, namespace string, limit int) ([]domainresource.ClusterEventView, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	items, err := c.typed.CoreV1().Events(namespace).List(queryCtx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
+	items, cached := cachedResourceItems[corev1.Event](queryCtx, c, "Event", namespace)
+	if !cached {
+		live, err := c.typed.CoreV1().Events(namespace).List(queryCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		items = live.Items
 	}
-	views := make([]domainresource.ClusterEventView, 0, len(items.Items))
-	for _, item := range items.Items {
+	views := make([]domainresource.ClusterEventView, 0, len(items))
+	for _, item := range items {
 		views = append(views, mapClusterEvent(item))
 	}
 	sort.SliceStable(views, func(i, j int) bool {

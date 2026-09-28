@@ -1,6 +1,9 @@
 package resource
 
-import contractsresource "github.com/opensoha/soha-contracts/resource"
+import (
+	"github.com/opensoha/soha-contracts/gen/go/sohaapi"
+	contractsresource "github.com/opensoha/soha-contracts/resource"
+)
 
 const (
 	PodLogsMaxContentBytes = contractsresource.PodLogsMaxContentBytes
@@ -13,6 +16,8 @@ type (
 	CustomResourceYAMLRequest = contractsresource.CustomResourceYAMLRequest
 	NamespaceView             = contractsresource.NamespaceView
 	NamespaceUpsertInput      = contractsresource.NamespaceUpsertInput
+	NodeDrainInput            = contractsresource.NodeDrainInput
+	ConfigReferenceView       = sohaapi.KubernetesConfigReference
 
 	PodView                       = contractsresource.PodView
 	PodDetailView                 = contractsresource.PodDetailView

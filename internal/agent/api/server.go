@@ -18,6 +18,7 @@ import (
 	apiMiddleware "github.com/opensoha/soha-agent/internal/api/middleware"
 	apiresponse "github.com/opensoha/soha-agent/internal/api/response"
 	"go.uber.org/zap"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 type Server struct {
@@ -95,6 +96,7 @@ func registerPlatformRoutes(router *gin.Engine, cfg cfgpkg.Config, client *k8sag
 	registerResourceYAMLRoutes(platform, client, actions)
 	registerResourceCreationRoutes(platform, client, actions)
 	registerCustomResourceRoutes(platform, client, actions)
+	registerPrometheusRoutes(platform, cfg.Prometheus)
 	origins := newWebSocketOriginPolicy(cfg.HTTP.AllowedOrigins, cfg.Auth.BearerToken)
 	registerPortForwardRoutes(
 		platform,
@@ -110,6 +112,8 @@ func registerPlatformRoutes(router *gin.Engine, cfg cfgpkg.Config, client *k8sag
 	registerPlatformInventoryRoutes(platform, client)
 	registerPlatformWorkloadRoutes(platform, client, actions)
 	registerPlatformConfigurationRoutes(platform, client)
+	registerConfigurationObjectReadRoutes(platform.Group("/ownership-v2"), client)
+	registerBasicResourceMutationRoutes(platform.Group("/ownership-v2"), client, actions)
 	registerPlatformRBACRoutes(platform, client)
 	registerPlatformNetworkRoutes(platform, client)
 	registerPlatformStorageRoutes(platform, client)
@@ -141,6 +145,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func writeError(c *gin.Context, err error) {
 	if errors.Is(err, resourceruntime.ErrResourceOwnership) {
 		apiresponse.Error(c, http.StatusConflict, "resource_ownership_conflict", "resource is externally managed or being deleted; use its delivery owner")
+		return
+	}
+	if apierrors.IsForbidden(err) {
+		apiresponse.Error(c, 403, "forbidden", "Agent ServiceAccount lacks permission for this resource operation")
+		return
+	}
+	if apierrors.IsNotFound(err) {
+		apiresponse.Error(c, 404, "not_found", "resource not found")
+		return
+	}
+	if apierrors.IsBadRequest(err) || apierrors.IsInvalid(err) {
+		apiresponse.Error(c, 400, "invalid_argument", "invalid resource input or immutable resource")
+		return
+	}
+	if apierrors.IsConflict(err) {
+		apiresponse.Error(c, 409, "conflict", "resource changed; refresh and try again")
 		return
 	}
 	apiresponse.Error(c, http.StatusBadGateway, "cluster_unavailable", "cluster request failed")
