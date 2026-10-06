@@ -11,9 +11,43 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	metadatafake "k8s.io/client-go/metadata/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
 )
+
+func TestCRDDefinitionDeletionFencesUIDAndResourceVersion(t *testing.T) {
+	gvr := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+	for _, uid := range []string{"", "old-uid", "observed-uid"} {
+		t.Run(uid, func(t *testing.T) {
+			item := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition", "metadata": map[string]any{"name": "widgets.example.com", "uid": "observed-uid", "resourceVersion": "7"}}}
+			dynamic := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), item)
+			client := &Client{dynamic: dynamic}
+			err := client.DeleteCRDDefinition(context.Background(), item.GetName(), uid)
+			if (err == nil) != (uid == "observed-uid") {
+				t.Fatalf("uid=%q err=%v", uid, err)
+			}
+			deletes := 0
+			for _, action := range dynamic.Actions() {
+				if action.GetVerb() != "delete" {
+					continue
+				}
+				deletes++
+				deleteAction, ok := action.(k8stesting.DeleteAction)
+				if !ok {
+					t.Fatalf("unexpected delete action: %T", action)
+				}
+				options := deleteAction.GetDeleteOptions()
+				if action.GetResource() != gvr || options.Preconditions == nil || options.Preconditions.UID == nil || string(*options.Preconditions.UID) != uid || options.Preconditions.ResourceVersion == nil || *options.Preconditions.ResourceVersion != "7" {
+					t.Fatalf("unfenced delete: %+v", action)
+				}
+			}
+			if deletes != 0 && uid != "observed-uid" || deletes != 1 && uid == "observed-uid" {
+				t.Fatalf("uid=%q deletes=%d", uid, deletes)
+			}
+		})
+	}
+}
 
 func TestCustomResourceCRUDUsesDynamicClient(t *testing.T) {
 	definition := domainresource.CRDResourceDefinition{

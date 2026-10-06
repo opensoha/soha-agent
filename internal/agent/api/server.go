@@ -111,7 +111,7 @@ func registerPlatformRoutes(router *gin.Engine, cfg cfgpkg.Config, client *k8sag
 	registerPodTerminalRoutes(platform, client, actions, origins)
 	registerPlatformInventoryRoutes(platform, client)
 	registerPlatformWorkloadRoutes(platform, client, actions)
-	registerPlatformConfigurationRoutes(platform, client)
+	registerPlatformConfigurationRoutes(platform, client, actions)
 	registerConfigurationObjectReadRoutes(platform.Group("/ownership-v2"), client)
 	registerBasicResourceMutationRoutes(platform.Group("/ownership-v2"), client, actions)
 	registerPlatformRBACRoutes(platform, client)

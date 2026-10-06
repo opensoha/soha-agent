@@ -586,6 +586,7 @@ func (c *Client) listCRDSummaries(ctx context.Context) ([]domainresource.CRDView
 			scope = "Namespaced"
 		}
 		views = append(views, domainresource.CRDView{
+			UID: string(item.UID), DeletingAt: customResourceDeletingAt(item.DeletionTimestamp),
 			Name: item.Name, Group: group, Scope: scope, Kind: info.kind, Plural: plural,
 			Version: info.preferred, Versions: info.versions,
 			CreatedAt:  item.CreationTimestamp.Time.UTC().Format(time.RFC3339),

@@ -28,6 +28,7 @@ const (
 	actionPlatformResourcesApply          = "platform.resources.apply"
 	actionPlatformResourcesCreate         = "platform.resources.create"
 	actionPlatformResourcesDelete         = "platform.resources.delete"
+	actionPlatformCRDsDelete              = "platform.crds.delete"
 	actionPlatformCustomResourcesList     = "platform.custom_resources.list"
 	actionPlatformCustomResourcesCreate   = "platform.custom_resources.create"
 	actionPlatformCustomResourcesApply    = "platform.custom_resources.apply"
