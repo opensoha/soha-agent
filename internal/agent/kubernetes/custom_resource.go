@@ -59,6 +59,16 @@ func customResourceDeletingAt(value *metav1.Time) string {
 	return value.UTC().Format(time.RFC3339)
 }
 
+func (c *Client) DeleteCRDDefinition(ctx context.Context, name, expectedUID string) error {
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(expectedUID) == "" || len(expectedUID) > 128 {
+		return fmt.Errorf("CRD name and deletion identity are required")
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	gvr := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+	return contractruntime.DeleteManifest(queryCtx, c.dynamic.Resource(gvr), name, expectedUID)
+}
+
 func (c *Client) GetCustomResourceYAML(ctx context.Context, definition domainresource.CRDResourceDefinition, namespace, name string) (domainresource.ResourceYAMLView, error) {
 	resource, _, err := c.customResource(definition, namespace, nil)
 	if err != nil {

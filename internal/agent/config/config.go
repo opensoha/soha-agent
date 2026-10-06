@@ -465,6 +465,7 @@ func knownAction(action string) bool {
 		"platform.resources.apply",
 		"platform.resources.create",
 		"platform.resources.delete",
+		"platform.crds.delete",
 		"platform.custom_resources.list",
 		"platform.custom_resources.create",
 		"platform.custom_resources.apply",

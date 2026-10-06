@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, for example v0.1.7"
+        description: "Release version, for example v0.1.9"
         required: true
-        default: "v0.1.7"
+        default: "v0.1.9"
       contracts_ref:
         description: "Optional assertion of the contracts version pinned in go.mod"
         required: false
@@ -156,6 +156,40 @@ jobs:
           tags: |
             ghcr.io/opensoha/soha-hermes-agent:${{ github.event.inputs.version || github.ref_name }}
             ghcr.io/opensoha/soha-hermes-agent:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          build-contexts: |
+            contracts=./soha-contracts
+          build-args: |
+            VERSION=${{ github.event.inputs.version || github.ref_name }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
+      - name: Build Buildpacks runner image
+        uses: docker/build-push-action@v6
+        with:
+          context: soha-agent
+          file: soha-agent/deploy/Dockerfile
+          target: buildpacks-runtime
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: ghcr.io/opensoha/soha-buildpacks-agent:${{ github.event.inputs.version || github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          build-contexts: |
+            contracts=./soha-contracts
+          build-args: |
+            VERSION=${{ github.event.inputs.version || github.ref_name }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
+      - name: Build daemonless Buildpacks runner image
+        uses: docker/build-push-action@v6
+        with:
+          context: soha-agent
+          file: soha-agent/deploy/Dockerfile
+          target: buildpacks-daemonless-runtime
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: ghcr.io/opensoha/soha-buildpacks-agent:daemonless-${{ github.event.inputs.version || github.ref_name }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           build-contexts: |

@@ -35,6 +35,8 @@ security:
     - platform.resources.apply
     - platform.resources.create
     - platform.resources.delete
+    # Enable explicitly to delete CRD definitions and all their instances:
+    # - platform.crds.delete
     - platform.custom_resources.list
     - platform.custom_resources.create
     - platform.custom_resources.apply

@@ -2,13 +2,14 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
 	apiresponse "github.com/opensoha/soha-agent/internal/api/response"
 )
 
-func registerPlatformConfigurationRoutes(platform *gin.RouterGroup, client *k8sagent.Client) {
+func registerPlatformConfigurationRoutes(platform *gin.RouterGroup, client *k8sagent.Client, actions actionPolicy) {
 	platform.GET("/configuration/configmaps", func(c *gin.Context) {
 		namespace := c.Query("namespace")
 		items, err := client.ListConfigMaps(c.Request.Context(), namespace)
@@ -158,6 +159,26 @@ func registerPlatformConfigurationRoutes(platform *gin.RouterGroup, client *k8sa
 			writeError(c, err)
 			return
 		}
+		for index := range items {
+			items[index].AllowedActions = []string{"list", "view"}
+			if actions.allows(actionPlatformCRDsDelete) {
+				items[index].AllowedActions = append(items[index].AllowedActions, "delete")
+			}
+		}
 		apiresponse.Items(c, http.StatusOK, items)
+	})
+	platform.DELETE("/extensions/crds/:name", actions.Require(actionPlatformCRDsDelete), func(c *gin.Context) {
+		var query struct {
+			ExpectedUID string `form:"expectedUid" binding:"required,max=128"`
+		}
+		if err := c.ShouldBindQuery(&query); err != nil || strings.TrimSpace(query.ExpectedUID) == "" {
+			apiresponse.Error(c, http.StatusBadRequest, "invalid_argument", "invalid deletion identity")
+			return
+		}
+		if err := client.DeleteCRDDefinition(c.Request.Context(), c.Param("name"), query.ExpectedUID); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
 	})
 }

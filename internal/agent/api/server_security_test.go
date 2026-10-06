@@ -130,6 +130,27 @@ func TestObservedCustomResourceDeleteRequiresAction(t *testing.T) {
 	}
 }
 
+func TestCRDDefinitionDeleteRequiresDedicatedActionAndIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, actions := range [][]string{nil, {actionPlatformResourcesDelete}, {actionPlatformCRDsDelete}} {
+		configuration := cfgpkg.Config{HTTP: cfgpkg.HTTPConfig{BasePath: "/api/v1"}, Auth: cfgpkg.AuthConfig{BearerToken: "agent-token"}, Security: cfgpkg.SecurityConfig{AllowedActions: actions}}
+		server := New(configuration, zap.NewNop(), &k8sagent.Client{}, nil)
+		for _, identity := range []string{"", "?expectedUid=%20", "?expectedUid=" + strings.Repeat("a", 129)} {
+			request := httptest.NewRequest(http.MethodDelete, "/api/v1/platform/extensions/crds/widgets.example.com"+identity, nil)
+			request.Header.Set("Authorization", "Bearer agent-token")
+			response := httptest.NewRecorder()
+			server.httpServer.Handler.ServeHTTP(response, request)
+			want := http.StatusForbidden
+			if len(actions) > 0 && actions[0] == actionPlatformCRDsDelete {
+				want = http.StatusBadRequest
+			}
+			if response.Code != want {
+				t.Fatalf("actions=%v identity=%q status=%d want=%d", actions, identity, response.Code, want)
+			}
+		}
+	}
+}
+
 func TestRuntimeCancelAllowedWhenActionAllowlisted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	core, logs := observer.New(zap.InfoLevel)

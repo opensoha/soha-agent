@@ -11,7 +11,7 @@ import (
 func TestRegisterPlatformConfigurationDetailRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	registerPlatformConfigurationRoutes(router.Group("/api/v1/platform"), &k8sagent.Client{})
+	registerPlatformConfigurationRoutes(router.Group("/api/v1/platform"), &k8sagent.Client{}, actionPolicy{})
 	registered := map[string]struct{}{}
 	for _, route := range router.Routes() {
 		registered[route.Method+" "+route.Path] = struct{}{}

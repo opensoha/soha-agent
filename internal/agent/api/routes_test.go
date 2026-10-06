@@ -34,15 +34,16 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 	}
 	sort.Strings(signatures)
 	routeDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(signatures, "\n"))))
-	if len(signatures) != 265 {
-		t.Fatalf("route count = %d, want 265", len(signatures))
+	if len(signatures) != 266 {
+		t.Fatalf("route count = %d, want 266", len(signatures))
 	}
-	const expectedRouteDigest = "197aa13a2ddc461bd1e4c5f41b15bc8f687f8cc10c564aa4c61ec9963e143845"
+	const expectedRouteDigest = "12a588682318a8f3a4e1de633a2d38045cf987ecee19c3911fb5de647f70e086"
 	if routeDigest != expectedRouteDigest {
 		t.Fatalf("route digest = %s, want %s", routeDigest, expectedRouteDigest)
 	}
 
 	expected := []string{
+		http.MethodDelete + " /api/v1/platform/extensions/crds/:name",
 		http.MethodPost + " /api/v1/platform/extensions/custom-resources/access",
 		http.MethodPost + " /api/v1/platform/metrics/prometheus/query",
 		http.MethodGet + " /api/v1/platform/ownership-v2/configuration/secrets/:name/detail",
