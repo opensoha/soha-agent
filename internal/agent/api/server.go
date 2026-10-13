@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/opensoha/soha-agent/internal/agent/buildinfo"
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
+	"github.com/opensoha/soha-agent/internal/agent/environment"
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
 	runnerpkg "github.com/opensoha/soha-agent/internal/agent/runner"
 	apiMiddleware "github.com/opensoha/soha-agent/internal/api/middleware"
@@ -22,7 +23,12 @@ import (
 )
 
 type Server struct {
-	httpServer *http.Server
+	sshSessions         *sshSessions
+	httpServer          *http.Server
+	personalEnvironment *environment.DockerExecutor
+	cleanupContext      context.Context
+	cleanupCancel       context.CancelFunc
+	logger              *zap.Logger
 }
 
 type RuntimeTaskController interface {
@@ -63,9 +69,11 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 	registerSystemRoutes(router, cfg, client, runtime)
 	registerPlatformRoutes(router, cfg, client, actions)
 	registerRuntimeRoutes(router, cfg, runtime, actions)
+	sshSessions := registerSSHRoutes(router, cfg, actions)
 	registerAgentToolRoutes(router, cfg, runtime)
 	registerDockerRuntimeRoutes(router, cfg, logger, actions)
 	registerOutpostRoutes(router, cfg, runtime)
+	personalEnvironment := registerPersonalEnvironmentRoutes(router, cfg, logger, actions)
 
 	httpLogger.Info("agent server configured",
 		zap.String("event", "agent.server.configured"),
@@ -78,7 +86,8 @@ func New(cfg cfgpkg.Config, logger *zap.Logger, client *k8sagent.Client, runtime
 		zap.String("commit", buildinfo.Current().Commit),
 	)
 
-	return &Server{httpServer: &http.Server{
+	cleanupContext, cleanupCancel := context.WithCancel(context.Background())
+	return &Server{sshSessions: sshSessions, personalEnvironment: personalEnvironment, cleanupContext: cleanupContext, cleanupCancel: cleanupCancel, logger: logger, httpServer: &http.Server{
 		Addr:              cfg.HTTP.Addr,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -131,6 +140,14 @@ func registerPlatformRoutes(router *gin.Engine, cfg cfgpkg.Config, client *k8sag
 }
 
 func (s *Server) Run() error {
+	if s.personalEnvironment != nil {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			s.collectPersonalEnvironments()
+		}()
+		defer func() { s.cleanupCancel(); <-done }()
+	}
 	err := s.httpServer.ListenAndServe()
 	if err == nil || err == http.ErrServerClosed {
 		return nil
@@ -139,7 +156,26 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.sshSessions != nil {
+		s.sshSessions.Close()
+	}
+	s.cleanupCancel()
 	return s.httpServer.Shutdown(ctx)
+}
+
+func (s *Server) collectPersonalEnvironments() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		if _, err := s.personalEnvironment.GC(s.cleanupContext, time.Now().UTC()); err != nil && s.cleanupContext.Err() == nil {
+			s.logger.Warn("personal environment cleanup could not confirm release")
+		}
+		select {
+		case <-s.cleanupContext.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func writeError(c *gin.Context, err error) {

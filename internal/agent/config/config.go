@@ -16,15 +16,22 @@ import (
 const knownPublicProjectToken = "soha-1234567890123456789012345678901234567890"
 
 type Config struct {
-	Prometheus   PrometheusConfig   `mapstructure:"prometheus"`
-	App          AppConfig          `mapstructure:"app"`
-	HTTP         HTTPConfig         `mapstructure:"http"`
-	Logger       LoggerConfig       `mapstructure:"logger"`
-	Auth         AuthConfig         `mapstructure:"auth"`
-	Security     SecurityConfig     `mapstructure:"security"`
-	Audit        AuditConfig        `mapstructure:"audit"`
-	ControlPlane ControlPlaneConfig `mapstructure:"control_plane"`
-	Kubernetes   KubernetesConfig   `mapstructure:"kubernetes"`
+	Prometheus          PrometheusConfig          `mapstructure:"prometheus"`
+	App                 AppConfig                 `mapstructure:"app"`
+	HTTP                HTTPConfig                `mapstructure:"http"`
+	Logger              LoggerConfig              `mapstructure:"logger"`
+	Auth                AuthConfig                `mapstructure:"auth"`
+	Security            SecurityConfig            `mapstructure:"security"`
+	Audit               AuditConfig               `mapstructure:"audit"`
+	ControlPlane        ControlPlaneConfig        `mapstructure:"control_plane"`
+	Kubernetes          KubernetesConfig          `mapstructure:"kubernetes"`
+	PersonalEnvironment PersonalEnvironmentConfig `mapstructure:"personal_environment"`
+}
+
+type PersonalEnvironmentConfig struct {
+	Enabled          bool   `mapstructure:"enabled"`
+	Image            string `mapstructure:"image"`
+	QuotaHelperImage string `mapstructure:"quota_helper_image"`
 }
 
 type AppConfig struct {
@@ -245,7 +252,26 @@ func Validate(cfg Config) error {
 	if err := validateBuildpacksConfig(cfg); err != nil {
 		return err
 	}
+	if err := validatePersonalEnvironmentConfig(cfg); err != nil {
+		return err
+	}
 	return validateOutpostConfig(cfg.ControlPlane)
+}
+
+func validatePersonalEnvironmentConfig(cfg Config) error {
+	if !cfg.PersonalEnvironment.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.Auth.BearerToken) == "" {
+		return fmt.Errorf("personal_environment requires an Agent bearer token")
+	}
+	if !pinnedBuildpacksImage.MatchString(cfg.PersonalEnvironment.Image) || !pinnedBuildpacksImage.MatchString(cfg.PersonalEnvironment.QuotaHelperImage) {
+		return fmt.Errorf("personal_environment images must use immutable SHA256 digests")
+	}
+	if cfg.HTTP.WriteTimeout < 35*time.Second {
+		return fmt.Errorf("http.write_timeout must be at least 35s when personal_environment is enabled")
+	}
+	return nil
 }
 
 func validateAgentSessionConfig(controlPlane ControlPlaneConfig) error {
@@ -309,6 +335,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.bearer_token", "")
 	v.SetDefault("auth.bearer_token_file", "")
 	v.SetDefault("security.allowed_actions", []string{})
+	v.SetDefault("personal_environment.enabled", false)
+	v.SetDefault("personal_environment.image", "")
+	v.SetDefault("personal_environment.quota_helper_image", "")
 	v.SetDefault("audit.file_path", "")
 	v.SetDefault("prometheus.base_url", "")
 	v.SetDefault("prometheus.bearer_token", "")
@@ -477,7 +506,13 @@ func knownAction(action string) bool {
 		"platform.helm_releases.values_update",
 		"platform.helm_releases.delete",
 		"platform.helm_releases.rollback",
-		"runtime.execution_tasks.cancel",
+		"runtime.execution_tasks.cancel", "runtime.vm_ssh.connect", "runtime.vm_ssh.execute",
+		"runtime.personal_environments.acquire",
+		"runtime.personal_environments.preflight",
+		"runtime.personal_environments.inspect",
+		"runtime.personal_environments.execute",
+		"runtime.personal_environments.release",
+		"runtime.personal_environments.delete_data", "runtime.personal_environments.export_data",
 		"docker.runtime.terminal":
 		return true
 	default:

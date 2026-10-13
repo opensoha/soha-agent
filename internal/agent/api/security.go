@@ -42,6 +42,15 @@ const (
 	actionPlatformHelmReleaseRollback     = "platform.helm_releases.rollback"
 	actionRuntimeExecutionTaskCancel      = "runtime.execution_tasks.cancel"
 	actionDockerRuntimeTerminal           = "docker.runtime.terminal"
+	actionVMSSHConnect                    = "runtime.vm_ssh.connect"
+	actionVMSSHExecute                    = "runtime.vm_ssh.execute"
+	actionPersonalEnvironmentAcquire      = "runtime.personal_environments.acquire"
+	actionPersonalEnvironmentPreflight    = "runtime.personal_environments.preflight"
+	actionPersonalEnvironmentInspect      = "runtime.personal_environments.inspect"
+	actionPersonalEnvironmentExecute      = "runtime.personal_environments.execute"
+	actionPersonalEnvironmentRelease      = "runtime.personal_environments.release"
+	actionPersonalEnvironmentDeleteData   = "runtime.personal_environments.delete_data"
+	actionPersonalEnvironmentExportData   = "runtime.personal_environments.export_data"
 )
 
 type actionPolicy struct {

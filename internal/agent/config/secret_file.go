@@ -56,53 +56,62 @@ func resolveBearerTokenFile(section string, token, tokenFile *string) error {
 }
 
 func readBearerTokenFile(path string) (string, error) {
-	if !filepath.IsAbs(path) {
-		return "", errors.New("bearer token file path must be absolute")
-	}
-	if err := validateSecretDirectory(filepath.Dir(path)); err != nil {
+	data, err := ReadPrivateFile(path, maxBearerTokenFileSize)
+	if err != nil {
 		return "", err
-	}
-
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", fmt.Errorf("inspect bearer token file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return "", errors.New("bearer token file must be a regular file, not a symlink")
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("bearer token file permissions %04o are too broad", info.Mode().Perm())
-	}
-	if info.Size() > maxBearerTokenFileSize {
-		return "", fmt.Errorf("bearer token file exceeds %d bytes", maxBearerTokenFileSize)
-	}
-
-	file, err := openSecretFileNoFollow(path)
-	if err != nil {
-		return "", fmt.Errorf("open bearer token file: %w", err)
-	}
-	defer func() {
-		_ = file.Close()
-	}()
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return "", fmt.Errorf("inspect opened bearer token file: %w", err)
-	}
-	if !os.SameFile(info, openedInfo) {
-		return "", errors.New("bearer token file changed while it was being opened")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxBearerTokenFileSize+1))
-	if err != nil {
-		return "", fmt.Errorf("read bearer token file: %w", err)
-	}
-	if len(data) > maxBearerTokenFileSize {
-		return "", fmt.Errorf("bearer token file exceeds %d bytes", maxBearerTokenFileSize)
 	}
 	token := strings.TrimSpace(string(data))
 	if token == "" {
 		return "", errors.New("bearer token file is empty")
 	}
 	return token, nil
+}
+
+// ReadPrivateFile reuses the token-file boundary for guest keys, configuration and durable state.
+func ReadPrivateFile(path string, maxBytes int64) ([]byte, error) {
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("private file path must be absolute")
+	}
+	if err := validateSecretDirectory(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect private file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("private file must be a regular file, not a symlink")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("private file permissions %04o are too broad", info.Mode().Perm())
+	}
+	if maxBytes < 1 || info.Size() > maxBytes {
+		return nil, errors.New("private file exceeds size limit")
+	}
+
+	file, err := openSecretFileNoFollow(path)
+	if err != nil {
+		return nil, fmt.Errorf("open private file: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect opened private file: %w", err)
+	}
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("private file changed while it was being opened")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read private file: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errors.New("private file exceeds size limit")
+	}
+	return data, nil
 }
 
 func validateSecretDirectory(path string) error {

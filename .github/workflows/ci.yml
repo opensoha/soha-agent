@@ -22,7 +22,7 @@ jobs:
           token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.6"
+          go-version: "1.27.2"
           cache: true
           cache-dependency-path: soha-agent/go.sum
       - name: Check Go module state
@@ -46,11 +46,11 @@ jobs:
         run: GOWORK=off go vet ./...
       - name: Govulncheck
         working-directory: soha-agent
-        run: GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
+        run: GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.9.0
+          version: v2.14.0
           working-directory: soha-agent
           only-new-issues: true
           args: --timeout=5m

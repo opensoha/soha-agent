@@ -23,3 +23,9 @@
 - 共享 runner/lifecycle 修改验证重试、租约及资源清理，新增外部操作保持有界超时和现有审计路径；验证记录包括实际执行模式。
 
 - 测试/安全验收按需读取 [testing reference](.agents/skills/soha-agent/references/testing.md)；多仓专项审查可读取 Core 的 soha-security。独立 clone 的基础门禁不依赖该公共 Skill，不自动 clone 或安装工具。
+
+## Graphify
+
+- 跨模块依赖、共享能力影响、模块迁移或跨仓任务，先查询已有图谱并核对源码；在已确认的多仓工作区按 [Graphify 开发手册](../docs/graphify-development/runbook.md)检查新鲜度、查询和刷新。
+- 结构变更稳定后显式刷新受影响仓库及跨仓图；普通小修改、文案和局部样式不自动建图。刷新失败先诊断，不默认使用 `--force`。
+- 独立克隆时使用本仓 `graphify-out/graph.json` 与原生 Graphify 命令；缺少工具或图谱时直接查源码并说明缺口，不要求补齐相邻仓库。

@@ -18,7 +18,7 @@ control plane, and calls back with task, Docker, or Agent Runtime results.
 3. Use `SOHA_AGENT_CONFIG_FILE`, `SOHA_AGENT_*` env overrides, and `configs/agent.config.yaml` as the config path. Keep viper env keys aligned with config struct tags.
 4. When adding a runtime capability, decide whether it belongs to the local HTTP API, Kubernetes adapter, execution or Docker runner, Identity Outpost, environment runtime manager, Agent Runtime provider, or packaging. Put it in the existing owner.
 5. Keep diagnostics safe. `/api/v1/diagnostics` may summarize readiness and counts; it must not expose bearer tokens, kubeconfig contents, command secrets, or raw internal failures.
-6. For broad package or dependency changes, query `graphify-out/graph.json`. Refresh it only after source changes are stable and the worktree contents are understood; use `--force` after deletions and run diagnostics.
+6. For broad package or dependency changes, query `graphify-out/graph.json`. Refresh it only after source changes are stable and the worktree contents are understood; follow the Graphify workflow in the repository AGENTS.md and run diagnostics. Do not bypass shrink guards with `--force` by default.
 
 ## Architecture Rules
 
@@ -66,7 +66,7 @@ control plane, and calls back with task, Docker, or Agent Runtime results.
 
 ## CI Gate
 
-Use Go `1.26.6` and run the full gate for dependency, packaging, Dockerfile, workflow, or release changes:
+Use Go `1.27.2` and run the full gate for dependency, packaging, Dockerfile, workflow, or release changes:
 
 ```bash
 GOWORK=off go mod tidy
@@ -76,7 +76,7 @@ GOWORK=off go test ./...
 python3 deploy/hermes-tools/test_plugin.py
 GOWORK=off go test -race ./...
 GOWORK=off go vet ./...
-GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
+GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 GOWORK=off CGO_ENABLED=0 go build -o /tmp/soha-agent ./cmd/agent
 kubectl kustomize deploy/kubernetes/outpost | go run github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0 -kubernetes-version 1.34.1 -strict -summary -
 docker build --build-context contracts=../soha-contracts -f deploy/Dockerfile -t ghcr.io/opensoha/soha-agent:test .
@@ -86,7 +86,7 @@ docker build --build-context contracts=../soha-contracts --target buildpacks-dae
 git diff --check
 ```
 
-CI also runs `golangci-lint v2.9.0` with only-new-issues semantics. A missing local Docker or Kubernetes CLI prerequisite must be covered by the corresponding successful GitHub Actions job.
+CI also runs `golangci-lint v2.14.0` with only-new-issues semantics. A missing local Docker or Kubernetes CLI prerequisite must be covered by the corresponding successful GitHub Actions job.
 
 ## References
 

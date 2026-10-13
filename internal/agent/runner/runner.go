@@ -114,6 +114,7 @@ type Runner struct {
 	helmClaimToken      string
 	manifestExecutor    ManifestExecutor
 	manifestClusterID   string
+	sshClusterID        string
 	chatToolGrants      sync.Map
 	buildpacksBlocked   atomic.Bool
 }
@@ -234,6 +235,12 @@ func New(cfg cfgpkg.ControlPlaneConfig, logger *zap.Logger) *Runner {
 func (r *Runner) SetManifestExecutor(executor ManifestExecutor, clusterID string) {
 	r.manifestExecutor = executor
 	r.manifestClusterID = strings.TrimSpace(clusterID)
+}
+
+func (r *Runner) SetSSHExecutor(clusterID string, enabled bool) {
+	if enabled {
+		r.sshClusterID = strings.TrimSpace(clusterID)
+	}
 }
 
 func (r *Runner) ApplyAgentProviderRegistrySnapshot(snapshot AgentProviderRegistry, now time.Time) AgentProviderRegistryApplyResult {
@@ -439,7 +446,7 @@ func (r *Runner) Start(ctx context.Context) {
 	if !r.cfg.Enabled || strings.TrimSpace(r.cfg.BaseURL) == "" || strings.TrimSpace(r.cfg.BearerToken) == "" {
 		return
 	}
-	if len(r.cfg.ProviderKinds) > 0 || r.cfg.Buildpacks.Enabled {
+	if len(r.cfg.ProviderKinds) > 0 || r.cfg.Buildpacks.Enabled || r.sshClusterID != "" {
 		go r.loop(ctx)
 	}
 	if r.cfg.Docker.Enabled {
@@ -545,6 +552,9 @@ func (r *Runner) claim(ctx context.Context) (ExecutionTask, bool) {
 	if r.cfg.Buildpacks.Enabled {
 		providerKinds = []string{"buildpacks_runner." + r.cfg.AgentID}
 	}
+	if r.sshClusterID != "" {
+		providerKinds = append(providerKinds, "vm_ssh."+r.sshClusterID)
+	}
 	if r.manifestExecutor != nil && r.manifestClusterID != "" {
 		providerKinds = append(providerKinds, "manifest_agent."+r.manifestClusterID, resourceruntime.ManifestAgentProviderPrefix+r.manifestClusterID)
 	}
@@ -610,6 +620,10 @@ func (r *Runner) claimDockerOperation(ctx context.Context) (DockerOperation, boo
 }
 
 func (r *Runner) execute(ctx context.Context, task ExecutionTask) {
+	if task.TaskKind == "vm_ssh_command" {
+		r.executeSSHCommand(ctx, task)
+		return
+	}
 	if strings.HasPrefix(task.TaskKind, "helm_") {
 		taskCtx, cancel := r.executionTaskContext(ctx, task)
 		defer cancel()

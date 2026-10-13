@@ -50,6 +50,24 @@ security:
     - platform.helm_releases.rollback
     - runtime.execution_tasks.cancel
     - docker.runtime.terminal
+    # Enable after configuring an enrolled control-plane identity and VM SSH access.
+    # - runtime.vm_ssh.connect
+    # - runtime.vm_ssh.execute
+    # Personal environments require separate opt-in and pinned images below:
+    # - runtime.personal_environments.acquire
+    # - runtime.personal_environments.inspect
+    # - runtime.personal_environments.execute
+    # - runtime.personal_environments.release
+    # - runtime.personal_environments.delete_data
+    # - runtime.personal_environments.export_data
+
+# Dedicated Docker node: cgroup v2 and already-enabled, consistent Btrfs quotas.
+# Tasks never receive the Docker socket or helper management capabilities.
+# Enable with http.write_timeout >= 35s and the explicit actions above.
+personal_environment:
+  enabled: false
+  image: ""
+  quota_helper_image: ""
 
 prometheus:
   base_url: ""

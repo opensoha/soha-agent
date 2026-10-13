@@ -70,7 +70,9 @@ func (m *Manager) Acquire(lease Lease, now time.Time) (Lease, error) {
 	if _, exists := m.leases[lease.ID]; exists {
 		return Lease{}, fmt.Errorf("environment lease %q already exists", lease.ID)
 	}
-	lease.IssuedAt = now.UTC()
+	if lease.IssuedAt.IsZero() {
+		lease.IssuedAt = now.UTC()
+	}
 	lease.ReleasedAt = time.Time{}
 	m.leases[lease.ID] = lease
 	return lease, nil

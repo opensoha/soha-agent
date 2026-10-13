@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	agentapi "github.com/opensoha/soha-agent/internal/agent/api"
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
@@ -61,6 +62,7 @@ func New(ctx context.Context) (*App, error) {
 		}
 	}
 	runner := runnerpkg.New(controlPlane, logger)
+	runner.SetSSHExecutor(cfg.Kubernetes.ID, slices.Contains(cfg.Security.AllowedActions, "runtime.vm_ssh.connect") && slices.Contains(cfg.Security.AllowedActions, "runtime.vm_ssh.execute"))
 	if client != nil {
 		runner.SetManifestExecutor(client, cfg.Kubernetes.ID)
 		runner.SetHelmExecutor(client, cfg.Kubernetes.ID, cfg.Auth.BearerToken)

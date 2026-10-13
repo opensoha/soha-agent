@@ -27,15 +27,16 @@ const (
 var restrictedNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$`)
 
 type Spec struct {
-	Backend      string            `json:"backend"`
-	Name         string            `json:"name"`
-	Namespace    string            `json:"namespace,omitempty"`
-	Image        string            `json:"image,omitempty"`
-	Command      string            `json:"command,omitempty"`
-	Args         []string          `json:"args,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	Workspace    string            `json:"workspace,omitempty"`
-	ArtifactRefs []string          `json:"artifactRefs,omitempty"`
+	RequireExistingData bool              `json:"requireExistingData,omitempty"`
+	Backend             string            `json:"backend"`
+	Name                string            `json:"name"`
+	Namespace           string            `json:"namespace,omitempty"`
+	Image               string            `json:"image,omitempty"`
+	Command             string            `json:"command,omitempty"`
+	Args                []string          `json:"args,omitempty"`
+	Env                 map[string]string `json:"env,omitempty"`
+	Workspace           string            `json:"workspace,omitempty"`
+	ArtifactRefs        []string          `json:"artifactRefs,omitempty"`
 }
 
 type Handle struct {
