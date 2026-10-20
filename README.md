@@ -30,6 +30,12 @@ SOHA_AGENT_CONFIG_FILE=configs/agent.config.yaml go run ./cmd/agent
 
 ## Production hardening
 
+The Kubernetes starter and development example use the explicit **workbench** action set: resource CRUD, node drain, workload actions, Pod exec, port forwarding and Helm mutations. Existing installations must review the action/RBAC diff before applying the updated starter. The development example additionally opts into Docker terminal access; this is not part of the Kubernetes preset. CRD definition deletion remains a separate opt-in.
+
+Soha-generated installations provide **legacy**, **workbench** and **read-only** presets. Existing cluster registrations retain legacy permissions until a preset is explicitly selected and the installation manifest is regenerated and applied. Read-only excludes writes and execution, while retaining authorization review creation for diagnostics. These are installation presets; the running Agent continues to enforce its explicit `security.allowed_actions` and Kubernetes permissions.
+
+The authenticated `GET /api/v1/diagnostics/actions` separates implemented actions, the running Agent's configured allowlist, and cluster-wide SelfSubjectAccessReview evidence (cached for 30 seconds). Generic resources, custom resources, Helm and target-dependent forwarding remain `unknown` until a concrete target can be checked. Diagnostic reads never authorize a mutation. A failed drain retains the observed cordon state; inspect remaining Pods and schedulability before deciding to uncordon.
+
 Set `app.env: production` only with non-demo bearer tokens. Production config validation rejects wildcard mutation allowlists, unknown mutation actions, wildcard Docker operation kinds, and Docker terminal access without explicit `http.allowed_origins`.
 
 Mutation actions are denied by default. Add only the operations this agent is expected to perform:
@@ -96,16 +102,16 @@ Local diagnostics are available from `GET /api/v1/diagnostics`; the response is 
 The generic cluster agent image can be built with:
 
 ```sh
-make deploy-agent-image IMAGE_TAG=v0.1.9
+make deploy-agent-image IMAGE_TAG=v0.1.10
 ```
 
 The Hermes runner image can be built separately with:
 
 ```sh
-make deploy-hermes-image IMAGE_TAG=v0.1.9
+make deploy-hermes-image IMAGE_TAG=v0.1.10
 ```
 
-The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/arm64`) to GHCR as `ghcr.io/opensoha/soha-agent` and `ghcr.io/opensoha/soha-hermes-agent`, plus binary archives for Linux, macOS, and Windows. It also publishes the dedicated Buildpacks targets as `ghcr.io/opensoha/soha-buildpacks-agent:v0.1.9` and `ghcr.io/opensoha/soha-buildpacks-agent:daemonless-v0.1.9`. Each archive has a `.sha256` sidecar plus a release-level `SHA256SUMS` manifest.
+The release workflow publishes multi-arch Linux images (`linux/amd64`, `linux/arm64`) to GHCR as `ghcr.io/opensoha/soha-agent` and `ghcr.io/opensoha/soha-hermes-agent`, plus binary archives for Linux, macOS, and Windows. It also publishes the dedicated Buildpacks targets as `ghcr.io/opensoha/soha-buildpacks-agent:v0.1.10` and `ghcr.io/opensoha/soha-buildpacks-agent:daemonless-v0.1.10`. Each archive has a `.sha256` sidecar plus a release-level `SHA256SUMS` manifest.
 
 The packaged Outpost uses the same generic `soha-agent` image. Its protocol-matched Kubernetes install path and NGINX/Traefik ForwardAuth examples are documented in [`deploy/kubernetes/outpost`](./deploy/kubernetes/outpost/README.md). Helm packaging remains in `opensoha/soha-helm`; use the `soha-agent` chart with `mode=outpost`.
 

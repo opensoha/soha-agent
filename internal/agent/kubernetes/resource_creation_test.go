@@ -138,6 +138,9 @@ func TestCreateResourcesReturnsOnlyPersistentResponseUID(t *testing.T) {
 				if !ok {
 					t.Fatalf("create action type = %T", action)
 				}
+				if create.GetCreateOptions().FieldManager != resourceEditFieldManager {
+					t.Fatalf("create manager = %q; YAML edits would conflict with creation", create.GetCreateOptions().FieldManager)
+				}
 				dryRun := len(create.GetCreateOptions().DryRun) > 0
 				dryRuns = append(dryRuns, dryRun)
 				original, ok := create.GetObject().(*unstructured.Unstructured)

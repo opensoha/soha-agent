@@ -2,7 +2,6 @@ package kubernetes
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -36,13 +35,13 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
 	cfgpkg "github.com/opensoha/soha-agent/internal/agent/config"
 	domaincluster "github.com/opensoha/soha-agent/internal/domain/cluster"
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
 	helmrelease "github.com/opensoha/soha-contracts/helmrelease"
+	contractresource "github.com/opensoha/soha-contracts/resource"
 	contractruntime "github.com/opensoha/soha-contracts/resource/runtime"
 	"github.com/opensoha/soha-contracts/streamlimit"
 )
@@ -85,6 +84,7 @@ func New(cfg cfgpkg.KubernetesConfig) (*Client, error) {
 
 func (c *Client) Summary(_ context.Context) domaincluster.Summary {
 	summary := domaincluster.Summary{
+		Capabilities:   []string{contractresource.NetworkTopologySnapshotFeature, contractresource.NetworkTopologyGatewayL4Feature, contractresource.ResourceMonitoringSnapshotFeature},
 		ID:             c.cfg.ID,
 		Name:           c.cfg.Name,
 		Region:         c.cfg.Region,
@@ -107,7 +107,7 @@ func (c *Client) Summary(_ context.Context) domaincluster.Summary {
 	}
 
 	capabilities := []string{
-		"manifest.preflight", "manifest.ssa", "manifest.observe", contractruntime.ManifestAgentCapability,
+		contractresource.NetworkTopologySnapshotFeature, contractresource.NetworkTopologyGatewayL4Feature, contractresource.ResourceMonitoringSnapshotFeature, "manifest.preflight", "manifest.ssa", "manifest.observe", contractruntime.ManifestAgentCapability,
 		"logs.runtime.snapshot", "logs.runtime.stream", "logs.runtime.aggregate",
 	}
 	for _, group := range groups.Groups {
@@ -305,6 +305,7 @@ func (c *Client) GetPodYAML(ctx context.Context, namespace, name string) (domain
 		return domainresource.ResourceYAMLView{}, err
 	}
 	copyItem := item.DeepCopy()
+	copyItem.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}
 	copyItem.ManagedFields = nil
 	content, err := yaml.Marshal(copyItem)
 	if err != nil {
@@ -874,15 +875,7 @@ func (c *Client) applyResourceYAML(ctx context.Context, namespace, kind, name, c
 	unstructured.RemoveNestedField(item.Object, "metadata", "generation")
 	unstructured.RemoveNestedField(item.Object, "status")
 	analysis := analyzeResourceUpdate(current, item)
-	patch, err := json.Marshal(item.Object)
-	if err != nil {
-		return domainresource.ResourceYAMLView{}, analysis, err
-	}
-	options := metav1.PatchOptions{FieldManager: resourceEditFieldManager, Force: ptr.To(false)}
-	if dryRun {
-		options.DryRun = []string{metav1.DryRunAll}
-	}
-	updated, err := resource.Patch(queryCtx, name, types.ApplyPatchType, patch, options)
+	updated, err := contractruntime.ApplyResourceEdit(queryCtx, resource, current, item, resourceEditFieldManager, dryRun)
 	if err != nil {
 		if dryRun && apierrors.IsConflict(err) {
 			analysis.Conflicts = conflictsFromError(err.Error(), analysis)
@@ -914,8 +907,13 @@ func (c *Client) DeleteResource(ctx context.Context, namespace, kind, name strin
 	if err != nil {
 		return err
 	}
-	if strings.EqualFold(kind, "Pod") {
-		return resource.Delete(queryCtx, name, metav1.DeleteOptions{})
+	if strings.EqualFold(strings.TrimSpace(kind), "Pod") {
+		item, err := resource.Get(queryCtx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		uid, version := item.GetUID(), item.GetResourceVersion()
+		return resource.Delete(queryCtx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}})
 	}
 	return contractruntime.DeleteManifest(queryCtx, resource, name, "")
 }
@@ -949,84 +947,11 @@ func (c *Client) dynamicResource(gvr schema.GroupVersionResource, namespaceScope
 }
 
 func resourceGVRForKind(kind string) (schema.GroupVersionResource, bool, string, error) {
-	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "pod":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}, true, "Pod", nil
-	case "node":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}, false, "Node", nil
-	case "deployment":
-		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, true, "Deployment", nil
-	case "statefulset":
-		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}, true, "StatefulSet", nil
-	case "daemonset":
-		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}, true, "DaemonSet", nil
-	case "replicaset":
-		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}, true, "ReplicaSet", nil
-	case "job":
-		return schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}, true, "Job", nil
-	case "cronjob":
-		return schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"}, true, "CronJob", nil
-	case "configmap":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}, true, "ConfigMap", nil
-	case "secret":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}, true, "Secret", nil
-	case "serviceaccount":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "serviceaccounts"}, true, "ServiceAccount", nil
-	case "replicationcontroller":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "replicationcontrollers"}, true, "ReplicationController", nil
-	case "service":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "services"}, true, "Service", nil
-	case "persistentvolumeclaim":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumeclaims"}, true, "PersistentVolumeClaim", nil
-	case "persistentvolume":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumes"}, false, "PersistentVolume", nil
-	case "role":
-		return schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}, true, "Role", nil
-	case "rolebinding":
-		return schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"}, true, "RoleBinding", nil
-	case "resourcequota":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "resourcequotas"}, true, "ResourceQuota", nil
-	case "limitrange":
-		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "limitranges"}, true, "LimitRange", nil
-	case "lease":
-		return schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}, true, "Lease", nil
-	case "ingress":
-		return schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"}, true, "Ingress", nil
-	case "endpointslice":
-		return schema.GroupVersionResource{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}, true, "EndpointSlice", nil
-	case "networkpolicy":
-		return schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}, true, "NetworkPolicy", nil
-	case "ingressclass":
-		return schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingressclasses"}, false, "IngressClass", nil
-	case "gatewayclass":
-		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gatewayclasses"}, false, "GatewayClass", nil
-	case "gateway":
-		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gateways"}, true, "Gateway", nil
-	case "httproute":
-		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}, true, "HTTPRoute", nil
-	case "backendtlspolicy":
-		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "backendtlspolicies"}, true, "BackendTLSPolicy", nil
-	case "grpcroute":
-		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "grpcroutes"}, true, "GRPCRoute", nil
-	case "referencegrant":
-		return schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "referencegrants"}, true, "ReferenceGrant", nil
-	case "priorityclass":
-		return schema.GroupVersionResource{Group: "scheduling.k8s.io", Version: "v1", Resource: "priorityclasses"}, false, "PriorityClass", nil
-	case "runtimeclass":
-		return schema.GroupVersionResource{Group: "node.k8s.io", Version: "v1", Resource: "runtimeclasses"}, false, "RuntimeClass", nil
-	case "clusterrole":
-		return schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"}, false, "ClusterRole", nil
-	case "clusterrolebinding":
-		return schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"}, false, "ClusterRoleBinding", nil
-	case "mutatingwebhookconfiguration":
-		return schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingwebhookconfigurations"}, false, "MutatingWebhookConfiguration", nil
-	case "validatingwebhookconfiguration":
-		return schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingwebhookconfigurations"}, false, "ValidatingWebhookConfiguration", nil
-	case "storageclass":
-		return schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "storageclasses"}, false, "StorageClass", nil
-	default:
+	definition, ok := contractresource.LookupKubernetesResourceKind(kind)
+	if !ok || !definition.GenericYAML {
 		return schema.GroupVersionResource{}, false, "", fmt.Errorf("yaml apply does not support kind %s", kind)
 	}
+	return schema.GroupVersionResource{Group: definition.Group, Version: definition.Version, Resource: definition.Resource}, definition.Namespaced, definition.Kind, nil
 }
 
 func (c *Client) ListCRDs(ctx context.Context) ([]domainresource.CRDView, error) {

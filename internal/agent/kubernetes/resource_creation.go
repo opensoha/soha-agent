@@ -285,9 +285,9 @@ func (c *Client) createResource(ctx context.Context, candidate resourceCreateCan
 
 func resourceCreateOptions(dryRun bool) metav1.CreateOptions {
 	if dryRun {
-		return metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}}
+		return metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}, FieldManager: resourceEditFieldManager}
 	}
-	return metav1.CreateOptions{}
+	return metav1.CreateOptions{FieldManager: resourceEditFieldManager}
 }
 
 func contentHash(content string) string {

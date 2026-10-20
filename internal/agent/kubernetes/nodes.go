@@ -32,14 +32,17 @@ func buildNodeViews(nodes []corev1.Node, pods []corev1.Pod) []domainresource.Nod
 	items := make([]domainresource.NodeView, 0, len(nodes))
 	for _, node := range nodes {
 		items = append(items, domainresource.NodeView{
-			Name:       node.Name,
-			Status:     nodeStatus(node),
-			Roles:      nodeRoles(node),
-			Version:    node.Status.NodeInfo.KubeletVersion,
-			InternalIP: nodeInternalIP(node),
-			PodCount:   aggregates[node.Name].podCount,
-			AgeSeconds: secondsSince(node.CreationTimestamp.Time),
-			Resources:  buildNodeResourceSummary(node, aggregates[node.Name]),
+			Name:          node.Name,
+			Status:        nodeStatus(node),
+			Unschedulable: node.Spec.Unschedulable,
+			Taints:        mapNodeTaints(node.Spec.Taints),
+			Conditions:    mapNodeConditions(node),
+			Roles:         nodeRoles(node),
+			Version:       node.Status.NodeInfo.KubeletVersion,
+			InternalIP:    nodeInternalIP(node),
+			PodCount:      aggregates[node.Name].podCount,
+			AgeSeconds:    secondsSince(node.CreationTimestamp.Time),
+			Resources:     buildNodeResourceSummary(node, aggregates[node.Name]),
 		})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
@@ -55,19 +58,20 @@ func buildNodeDetail(node corev1.Node, pods []corev1.Pod) domainresource.NodeDet
 	}
 	aggregate := buildNodeAggregates(nodePods, true)[node.Name]
 	return domainresource.NodeDetailView{
-		Name:        node.Name,
-		Status:      nodeStatus(node),
-		Roles:       nodeRoles(node),
-		Version:     node.Status.NodeInfo.KubeletVersion,
-		InternalIP:  nodeInternalIP(node),
-		PodCount:    aggregate.podCount,
-		AgeSeconds:  secondsSince(node.CreationTimestamp.Time),
-		Labels:      cloneStringMap(node.Labels),
-		Annotations: cloneStringMap(node.Annotations),
-		Taints:      mapNodeTaints(node.Spec.Taints),
-		Conditions:  mapNodeConditions(node),
-		Resources:   buildNodeResourceSummary(node, aggregate),
-		Pods:        aggregate.pods,
+		Name:          node.Name,
+		Status:        nodeStatus(node),
+		Unschedulable: node.Spec.Unschedulable,
+		Roles:         nodeRoles(node),
+		Version:       node.Status.NodeInfo.KubeletVersion,
+		InternalIP:    nodeInternalIP(node),
+		PodCount:      aggregate.podCount,
+		AgeSeconds:    secondsSince(node.CreationTimestamp.Time),
+		Labels:        cloneStringMap(node.Labels),
+		Annotations:   cloneStringMap(node.Annotations),
+		Taints:        mapNodeTaints(node.Spec.Taints),
+		Conditions:    mapNodeConditions(node),
+		Resources:     buildNodeResourceSummary(node, aggregate),
+		Pods:          aggregate.pods,
 	}
 }
 

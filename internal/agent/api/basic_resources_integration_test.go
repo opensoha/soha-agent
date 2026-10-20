@@ -15,6 +15,7 @@ import (
 	k8sagent "github.com/opensoha/soha-agent/internal/agent/kubernetes"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 )
@@ -23,6 +24,10 @@ func TestBasicResourcesThroughAuthenticatedHTTPAndKubernetesREST(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var mu sync.Mutex
 	secret := corev1.Secret{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"}, ObjectMeta: metav1.ObjectMeta{Name: "auth", Namespace: "team", UID: "fixture-uid", ResourceVersion: "1"}, Data: map[string][]byte{"token": []byte("old")}}
+	node := corev1.Node{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Node"}, ObjectMeta: metav1.ObjectMeta{Name: "node", UID: "node-uid", ResourceVersion: "1"}}
+	controller := true
+	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "team", UID: "pod-uid", OwnerReferences: []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "app", Controller: &controller}}}, Spec: corev1.PodSpec{NodeName: "node"}}
+	podExists, evictions, disappearanceReads := true, 0, 0
 	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -47,9 +52,49 @@ func TestBasicResourcesThroughAuthenticatedHTTPAndKubernetesREST(t *testing.T) {
 			w.WriteHeader(403)
 			_ = json.NewEncoder(w).Encode(metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: "Failure", Reason: metav1.StatusReasonForbidden, Code: 403, Message: "private-provider-and-secret-value"})
 		case "/api/v1/nodes/node":
-			_ = json.NewEncoder(w).Encode(corev1.Node{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Node"}, ObjectMeta: metav1.ObjectMeta{Name: "node", UID: "node-uid"}, Spec: corev1.NodeSpec{Unschedulable: r.Method == http.MethodPatch}})
+			if r.Method == http.MethodPut {
+				raw, _ := io.ReadAll(r.Body)
+				var updated corev1.Node
+				if _, _, err := scheme.Codecs.UniversalDeserializer().Decode(raw, nil, &updated); err != nil {
+					t.Error(err)
+					w.WriteHeader(400)
+					return
+				}
+				if updated.UID != node.UID || updated.ResourceVersion != node.ResourceVersion {
+					t.Error("cordon did not fence the observed Node")
+					w.WriteHeader(409)
+					return
+				}
+				node = updated
+				node.ResourceVersion = "2"
+			}
+			_ = json.NewEncoder(w).Encode(node)
 		case "/api/v1/pods":
-			_ = json.NewEncoder(w).Encode(corev1.PodList{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"}, Items: []corev1.Pod{}})
+			items := []corev1.Pod{}
+			if podExists {
+				items = append(items, pod)
+			}
+			_ = json.NewEncoder(w).Encode(corev1.PodList{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"}, Items: items})
+		case "/api/v1":
+			_ = json.NewEncoder(w).Encode(metav1.APIResourceList{GroupVersion: "v1", APIResources: []metav1.APIResource{{Name: "pods/eviction", Kind: "Eviction", Group: "policy", Version: "v1"}}})
+		case "/api/v1/namespaces/team/pods/app/eviction":
+			if r.Method != http.MethodPost || !node.Spec.Unschedulable {
+				t.Error("Pod eviction did not follow cordon")
+				w.WriteHeader(409)
+				return
+			}
+			evictions++
+			podExists = false
+			_ = json.NewEncoder(w).Encode(policyv1.Eviction{TypeMeta: metav1.TypeMeta{APIVersion: "policy/v1", Kind: "Eviction"}, ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "team"}})
+		case "/api/v1/namespaces/team/pods/app":
+			if r.Method != http.MethodGet || evictions == 0 {
+				t.Errorf("unexpected Pod request %s before/after eviction count %d", r.Method, evictions)
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			disappearanceReads++
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(metav1.Status{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"}, Reason: metav1.StatusReasonNotFound, Code: 404})
 		default:
 			t.Errorf("unexpected Kubernetes request %s %s", r.Method, r.URL)
 			w.WriteHeader(500)
@@ -117,5 +162,10 @@ func TestBasicResourcesThroughAuthenticatedHTTPAndKubernetesREST(t *testing.T) {
 	}
 	if status, body = call("POST", "/infrastructure/nodes/node/drain", `{"timeoutSeconds":30}`, true); status != 204 {
 		t.Fatalf("drain over real HTTP: %d %s", status, body)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !node.Spec.Unschedulable || podExists || evictions != 1 || disappearanceReads == 0 {
+		t.Fatalf("drain result: cordoned=%v podExists=%v evictions=%d disappearanceReads=%d", node.Spec.Unschedulable, podExists, evictions, disappearanceReads)
 	}
 }

@@ -30,7 +30,9 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 	for _, route := range router.Routes() {
 		signature := route.Method + " " + route.Path
 		registered[signature] = struct{}{}
-		signatures = append(signatures, signature)
+		if signature != http.MethodGet+" /api/v1/diagnostics/actions" && signature != http.MethodPost+" /api/v1/platform/network/topology/snapshot" && signature != http.MethodGet+" /api/v1/platform/infrastructure/resource-monitoring" {
+			signatures = append(signatures, signature)
+		}
 	}
 	sort.Strings(signatures)
 	routeDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(signatures, "\n"))))
@@ -43,6 +45,9 @@ func TestNewRegistersRouteFamilies(t *testing.T) {
 	}
 
 	expected := []string{
+		http.MethodGet + " /api/v1/platform/infrastructure/resource-monitoring",
+		http.MethodPost + " /api/v1/platform/network/topology/snapshot",
+		http.MethodGet + " /api/v1/diagnostics/actions",
 		http.MethodGet + " /api/v1/ssh/capability",
 		http.MethodPost + " /api/v1/ssh/sessions",
 		http.MethodGet + " /api/v1/ssh/sessions/:id/stream",
