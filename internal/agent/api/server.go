@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	contractresource "github.com/opensoha/soha-contracts/resource"
 	resourceruntime "github.com/opensoha/soha-contracts/resource/runtime"
 	"io"
 	"net/http"
@@ -125,6 +126,7 @@ func registerPlatformRoutes(router *gin.Engine, cfg cfgpkg.Config, client *k8sag
 	registerBasicResourceMutationRoutes(platform.Group("/ownership-v2"), client, actions)
 	registerPlatformRBACRoutes(platform, client)
 	registerPlatformNetworkRoutes(platform, client)
+	registerTopologySnapshotRoute(platform, client, actions)
 	registerPlatformStorageRoutes(platform, client)
 	registerPlatformHelmReadRoutes(platform, client)
 	registerPlatformWorkloadMutationRoutes(platform, client, actions)
@@ -179,11 +181,16 @@ func (s *Server) collectPersonalEnvironments() {
 }
 
 func writeError(c *gin.Context, err error) {
+	var failure *contractresource.NodeDrainError
+	if errors.As(err, &failure) && contractresource.IsNodeDrainErrorCode(failure.Code) {
+		apiresponse.Error(c, http.StatusConflict, failure.Code, failure.Error())
+		return
+	}
 	if errors.Is(err, resourceruntime.ErrResourceOwnership) {
 		apiresponse.Error(c, http.StatusConflict, "resource_ownership_conflict", "resource is externally managed or being deleted; use its delivery owner")
 		return
 	}
-	if apierrors.IsForbidden(err) {
+	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
 		apiresponse.Error(c, 403, "forbidden", "Agent ServiceAccount lacks permission for this resource operation")
 		return
 	}

@@ -18,6 +18,7 @@ func registerSystemRoutes(
 	client *k8sagent.Client,
 	runtime RuntimeTaskController,
 ) {
+	registerActionDiagnostics(router, cfg, client)
 	router.GET("/healthz", func(c *gin.Context) {
 		apiresponse.JSON(c, http.StatusOK, gin.H{"status": "ok"})
 	})

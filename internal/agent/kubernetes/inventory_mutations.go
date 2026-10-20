@@ -2,8 +2,6 @@ package kubernetes
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -69,7 +67,7 @@ func (c *Client) DeleteNamespace(ctx context.Context, name string) error {
 	if err := contractruntime.ValidateDirectManifestOwner(item); err != nil {
 		return err
 	}
-	return c.typed.CoreV1().Namespaces().Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &item.UID}})
+	return c.typed.CoreV1().Namespaces().Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &item.UID, ResourceVersion: &item.ResourceVersion}})
 }
 func (c *Client) UpdateNode(ctx context.Context, name string, input domainresource.NodeUpdateInput) (domainresource.NodeDetailView, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -133,20 +131,20 @@ func (c *Client) DrainNode(ctx context.Context, name string, input domainresourc
 	if err := contractruntime.ValidateDirectManifestOwner(item); err != nil {
 		return err
 	}
-	helper := &drain.Helper{Ctx: ctx, Client: c.typed, Force: input.Force, GracePeriodSeconds: -1, IgnoreAllDaemonSets: true, DeleteEmptyDirData: input.DeleteEmptyDirData, Timeout: timeout, Out: io.Discard, ErrOut: io.Discard}
-	if err := drain.RunCordonOrUncordon(helper, item, true); err != nil {
-		return err
-	}
-	pods, errs := helper.GetPodsForDeletion(name)
-	if len(errs) > 0 {
-		return fmt.Errorf("select pods for node drain: %w", errors.Join(errs...))
-	}
-	for _, pod := range pods.Pods() {
-		if err := contractruntime.ValidateDirectManifestOwner(&pod); err != nil {
+	observed := contractruntime.NewDrainClient(c.typed)
+	helper := &drain.Helper{Ctx: ctx, Client: observed, Force: input.Force, GracePeriodSeconds: -1, IgnoreAllDaemonSets: true, DeleteEmptyDirData: input.DeleteEmptyDirData, Timeout: timeout, EvictErrorRetryDelay: time.Second, Out: io.Discard, ErrOut: io.Discard}
+	if !item.Spec.Unschedulable {
+		item.Spec.Unschedulable = true
+		if _, err := c.typed.CoreV1().Nodes().Update(ctx, item, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
 	}
-	return helper.DeleteOrEvictPods(pods.Pods())
+	pods, errs := helper.GetPodsForDeletion(name)
+	if len(errs) > 0 {
+		return observed.PodSelectionFailure(ctx, errs)
+	}
+	// Eviction deliberately handles controller-managed Pods; it is not a manifest edit.
+	return observed.Failure(ctx, helper.DeleteOrEvictPods(pods.Pods()))
 }
 func (c *Client) SetCronJobSuspend(ctx context.Context, namespace, name string, suspend bool) (domainresource.CronJobDetailView, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

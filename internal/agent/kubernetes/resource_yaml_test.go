@@ -3,6 +3,8 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	contractresource "github.com/opensoha/soha-contracts/resource"
 	"strings"
 	"testing"
 
@@ -188,5 +190,73 @@ func TestResourceGVRForKindSupportsWorkloadControllers(t *testing.T) {
 				t.Fatalf("resourceGVRForKind(%q) canonicalKind = %q, want %q", tc.kind, canonicalKind, tc.canonicalKind)
 			}
 		})
+	}
+}
+
+func TestAgentGenericKindsMatchContract(t *testing.T) {
+	for _, definition := range contractresource.KubernetesResourceKinds() {
+		gvr, namespaced, kind, err := resourceGVRForKind(definition.Kind)
+		if !definition.GenericYAML {
+			if err == nil {
+				t.Fatalf("dedicated lifecycle exposed: %s", definition.Kind)
+			}
+			continue
+		}
+		if err != nil || gvr.Group != definition.Group || gvr.Version != definition.Version || gvr.Resource != definition.Resource || namespaced != definition.Namespaced || kind != definition.Kind {
+			t.Fatalf("kind %s: %s %v %s %v", definition.Kind, gvr, namespaced, kind, err)
+		}
+	}
+	if _, _, _, err := resourceGVRForKind("Unknown"); err == nil {
+		t.Fatal("unknown kind accepted")
+	}
+}
+
+func TestHPAPDBYAMLLifecycle(t *testing.T) {
+	for _, kind := range []string{"HorizontalPodAutoscaler", "PodDisruptionBudget"} {
+		t.Run(kind, func(t *testing.T) {
+			gvr, _, _, _ := resourceGVRForKind(kind)
+			existing := &unstructured.Unstructured{Object: map[string]any{"apiVersion": gvr.GroupVersion().String(), "kind": kind, "metadata": map[string]any{"name": "app", "namespace": "team", "uid": "app-uid", "resourceVersion": "1"}}}
+			c := &Client{dynamic: newSSAFakeDynamicClient(t, gvr, existing)}
+			ctx := context.Background()
+			if _, err := c.GetResourceYAML(ctx, "team", kind, "app"); err != nil {
+				t.Fatal(err)
+			}
+			content := fmt.Sprintf("apiVersion: %s\nkind: %s\nmetadata:\n  name: app\n  namespace: team\n", gvr.GroupVersion(), kind)
+			if _, err := c.DryRunResourceYAML(ctx, "team", kind, "app", content); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.ApplyResourceYAML(ctx, "team", kind, "app", content); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.DeleteResource(ctx, "team", kind, "app"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPodDeleteAllowsControllerOwnerAndFencesIdentity(t *testing.T) {
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	item := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"name": "app", "namespace": "team", "uid": "pod-uid", "resourceVersion": "7", "ownerReferences": []any{map[string]any{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "app", "uid": "rs-uid", "controller": true}}}}}
+	dynamic := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), item)
+	if err := (&Client{dynamic: dynamic}).DeleteResource(context.Background(), "team", " Pod ", "app"); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, a := range dynamic.Actions() {
+		if a.GetVerb() == "delete" && a.GetResource() == gvr {
+			deleted, ok := a.(clienttesting.DeleteAction)
+			if !ok {
+				t.Fatalf("expected delete action, got %T", a)
+			}
+			pre := deleted.GetDeleteOptions().Preconditions
+			if pre == nil || pre.UID == nil || *pre.UID != "pod-uid" || pre.ResourceVersion == nil || *pre.ResourceVersion != "7" {
+				t.Fatalf("unfenced delete: %+v", pre)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing Pod delete")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	contractresource "github.com/opensoha/soha-contracts/resource"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,8 +14,12 @@ import (
 	domainresource "github.com/opensoha/soha-agent/internal/domain/resource"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
@@ -111,6 +116,7 @@ func TestNamespaceLifecycleKeepsIdentityAndDeleteUID(t *testing.T) {
 	}
 	ns, _ := typed.CoreV1().Namespaces().Get(ctx, "team", metav1.GetOptions{})
 	ns.UID = "team-uid"
+	ns.ResourceVersion = "7"
 	_, _ = typed.CoreV1().Namespaces().Update(ctx, ns, metav1.UpdateOptions{})
 	typed.ClearActions()
 	_, err = c.UpdateNamespace(ctx, "team", domainresource.NamespaceUpsertInput{Name: "other"})
@@ -129,7 +135,7 @@ func TestNamespaceLifecycleKeepsIdentityAndDeleteUID(t *testing.T) {
 	if !ok {
 		t.Fatal("last action is not a delete")
 	}
-	if pre := last.GetDeleteOptions().Preconditions; pre == nil || pre.UID == nil || *pre.UID != "team-uid" {
+	if pre := last.GetDeleteOptions().Preconditions; pre == nil || pre.UID == nil || *pre.UID != "team-uid" || pre.ResourceVersion == nil || *pre.ResourceVersion != "7" {
 		t.Fatal("delete lacks observed UID precondition")
 	}
 }
@@ -207,4 +213,97 @@ func TestNodeUpdateCannotIntroduceExternalOwnerLabels(t *testing.T) {
 		t.Fatal("Node update introduced external ownership")
 	}
 	assertNoMutation(t, typed.Actions())
+}
+
+func TestDrainManagedPodsUsesEvictionAndRetainsCordonOnFailure(t *testing.T) {
+	for _, outcome := range []string{"success", "forbidden", "pdb-retry", "pdb-cancel", "pdb-blocked"} {
+		t.Run(outcome, func(t *testing.T) {
+			controller := true
+			typed := fake.NewClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node", UID: "node-uid", ResourceVersion: "7"}}, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "team", OwnerReferences: []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "app", Controller: &controller}}}, Spec: corev1.PodSpec{NodeName: "node"}})
+			discovery, ok := typed.Discovery().(*fakediscovery.FakeDiscovery)
+			if !ok {
+				t.Fatalf("expected fake discovery, got %T", typed.Discovery())
+			}
+			discovery.Resources = []*metav1.APIResourceList{{GroupVersion: "v1", APIResources: []metav1.APIResource{{Name: "pods/eviction", Kind: "Eviction", Group: "policy", Version: "v1"}}}}
+			evictions := 0
+			typed.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+				if a.GetSubresource() != "eviction" {
+					return false, nil, nil
+				}
+				evictions++
+				if outcome == "forbidden" {
+					return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods/eviction"}, "app", errors.New("denied"))
+				}
+				if outcome == "pdb-blocked" {
+					blocked := apierrors.NewTooManyRequests("private provider detail", 1)
+					blocked.ErrStatus.Details = &metav1.StatusDetails{Causes: []metav1.StatusCause{{Type: policyv1.DisruptionBudgetCause}}}
+					return true, nil, blocked
+				}
+				if outcome == "pdb-cancel" || (outcome == "pdb-retry" && evictions == 1) {
+					return true, nil, apierrors.NewTooManyRequests("disruption budget exhausted", 1)
+				}
+				create, ok := a.(k8stesting.CreateAction)
+				if !ok {
+					t.Fatalf("expected create action, got %T", a)
+				}
+				eviction, ok := create.GetObject().(*policyv1.Eviction)
+				if !ok {
+					t.Fatalf("expected eviction, got %T", create.GetObject())
+				}
+				err := typed.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), "team", "app")
+				return true, eviction, err
+			})
+			ctx := context.Background()
+			if outcome == "pdb-cancel" || outcome == "pdb-blocked" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
+				defer cancel()
+			}
+			err := (&Client{typed: typed}).DrainNode(ctx, "node", domainresource.NodeDrainInput{TimeoutSeconds: 30})
+			if outcome == "pdb-blocked" {
+				var failure *contractresource.NodeDrainError
+				if !errors.As(err, &failure) || failure.Code != "node_drain_pdb_blocked" {
+					t.Fatalf("lost PDB reason: %v", err)
+				}
+			}
+			wantEvictions := 1
+			if outcome == "pdb-retry" {
+				wantEvictions = 2
+			}
+			if (err != nil) != (outcome == "forbidden" || outcome == "pdb-cancel" || outcome == "pdb-blocked") || evictions != wantEvictions {
+				t.Fatalf("drain: %v; evictions=%d", err, evictions)
+			}
+			node, _ := typed.CoreV1().Nodes().Get(context.Background(), "node", metav1.GetOptions{})
+			if !node.Spec.Unschedulable {
+				t.Fatal("drain lost cordon")
+			}
+			for _, a := range typed.Actions() {
+				if a.GetVerb() == "delete" && a.GetResource().Resource == "pods" {
+					t.Fatal("eviction bypassed by Pod delete")
+				}
+				if a.GetVerb() == "update" && a.GetResource().Resource == "nodes" {
+					update, ok := a.(k8stesting.UpdateAction)
+					if !ok {
+						t.Fatalf("expected update action, got %T", a)
+					}
+					written, ok := update.GetObject().(*corev1.Node)
+					if !ok {
+						t.Fatalf("expected node, got %T", update.GetObject())
+					}
+					if written.ResourceVersion != "7" || written.UID != "node-uid" {
+						t.Fatal("cordon lost identity fence")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestPodYAMLIncludesManifestIdentityAfterTypedDecode(t *testing.T) {
+	typed := fake.NewClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sample", Namespace: "demo"}})
+	client := &Client{typed: typed}
+	view, err := client.GetPodYAML(context.Background(), "demo", "sample")
+	if err != nil || !strings.Contains(view.Content, "apiVersion: v1\n") || !strings.Contains(view.Content, "kind: Pod\n") {
+		t.Fatalf("Pod YAML cannot be reapplied: %+v %v", view, err)
+	}
 }

@@ -261,6 +261,7 @@ func buildDiagnosticsCapabilitiesView(cfg cfgpkg.Config, kubernetesClientAvailab
 			"workload mutation actions are not fully allowlisted",
 			actionPlatformDeploymentRestart,
 			actionPlatformDeploymentScale,
+			actionPlatformDeploymentImage,
 			actionPlatformDeploymentRollback,
 			actionPlatformStatefulSetRestart,
 			actionPlatformStatefulSetScale,
@@ -277,6 +278,7 @@ func buildDiagnosticsCapabilitiesView(cfg cfgpkg.Config, kubernetesClientAvailab
 			actionPlatformHelmReleaseInstall,
 			actionPlatformHelmReleaseValuesUpdate,
 			actionPlatformHelmReleaseDelete,
+			actionPlatformHelmReleaseRollback,
 		),
 	)
 
