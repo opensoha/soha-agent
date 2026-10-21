@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, for example v0.1.10"
+        description: "Release version, for example v0.1.11"
         required: true
-        default: "v0.1.10"
+        default: "v0.1.11"
       contracts_ref:
         description: "Optional assertion of the contracts version pinned in go.mod"
         required: false
@@ -59,7 +59,7 @@ jobs:
           path: soha-agent
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: soha-agent/go.sum
       - name: Build binary

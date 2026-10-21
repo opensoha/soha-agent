@@ -22,7 +22,7 @@ jobs:
           token: ${{ secrets.OPENSOHA_CI_TOKEN || github.token }}
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: soha-agent/go.sum
       - name: Check Go module state
