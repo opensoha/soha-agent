@@ -328,7 +328,7 @@ spec:
       serviceAccountName: soha-agent
       containers:
         - name: soha-agent
-          image: ghcr.io/opensoha/soha-agent:v0.1.10
+          image: ghcr.io/opensoha/soha-agent:v0.1.11
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
